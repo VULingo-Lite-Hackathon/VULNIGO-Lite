@@ -27,7 +27,7 @@ back to the evidence behind it.
 | Repo intake + URL validation | ✅ Done | Only `https://github.com/<owner>/<repo>` is accepted. Clone runs with hooks, submodules, symlinks and non-https protocols disabled. Commit hash is recorded. |
 | Battle state machine | ✅ Done | Every transition from the blueprint (plus `MANAGER_ANALYSING`) is enforced in code. Illegal jumps such as `DEFENDING → PATCHING` raise errors. |
 | Docker sandbox runner | ✅ Code done · ⏳ not yet run on Vultr | `--network none`, nobody user, read-only root fs and code mount, caps dropped, CPU/mem/PID/time limits, optional gVisor (`runsc`). |
-| Containment probe ("containment moment") | ✅ Code done · ⏳ verify on VM | Before any repo code runs, the probe tries network, DNS, writing to the source, writing to `/etc`, the Docker socket, reading env secrets and root access. The UI shows each attempt as blocked or allowed. |
+| Containment probe ("containment moment") | ✅ Code done · ⏳ verify on VM | Before any repo code runs, the probe tries network, DNS, writing to the source, writing to `/etc`, the Docker socket, reading env secrets and root access. The UI shows each attempt as blocked or allowed. `sandbox/containment.sh` additionally fires a fork bomb, memory bomb, `rm -rf /`, egress/metadata and infinite-loop attack at the image and records HELD/BREACH. |
 | Security engine (CWE-78, Python) | ✅ Done | AST taint scanner, bounded proof harness (random token written to `/tmp`), benign-input check, project pytest as regression. |
 | Demo target repo (`demo_repo/`, FileDesk) | ✅ Done | One planted command injection in `filedesk/tools.py:10`, plus tests that must keep passing after the fix. |
 | Red / Blue / Manager / Backup agents | ✅ Done · ⏳ awaiting Vultr inference key | Use Vultr Serverless Inference (OpenAI-compatible). Without a key they run a deterministic fallback, labelled as such everywhere. |
@@ -146,11 +146,11 @@ as correctness.
 **Prerequisites:** Python 3.11+. Docker is needed for real sandboxed tests (Linux; the Vultr VM).
 
 ```sh
-git clone https://github.com/AssemblyAI-VoiceAgent-Hackathon/VULNIGO-Lite.git
+git clone https://github.com/VULingo-Lite-Hackathon/VULNIGO-Lite.git
 cd VULNIGO-Lite
 pip install -r requirements.txt
 cp .env.example .env                      # put VULTR_INFERENCE_API_KEY here; backend process only, never the sandbox
-docker build -t vulnigo-sandbox:latest -f deploy/sandbox.Dockerfile deploy
+docker build -t vulnigo-sandbox:latest sandbox
 uvicorn vulnigo.main:app --reload         # http://localhost:8000
 ```
 
@@ -167,13 +167,15 @@ pytest tests -q                           # intake, state machine, scanner/patch
 On a fresh Ubuntu 22.04/24.04 Vultr Cloud Compute instance (1 vCPU / 2 GB is enough), as root:
 
 ```sh
-git clone https://github.com/AssemblyAI-VoiceAgent-Hackathon/VULNIGO-Lite.git && cd VULNIGO-Lite
+git clone https://github.com/VULingo-Lite-Hackathon/VULNIGO-Lite.git && cd VULNIGO-Lite
 DOMAIN=your.domain.example bash deploy/setup.sh   # omit DOMAIN to serve plain HTTP on the VM's IP
 nano /opt/vulnigo/.env                            # set VULTR_INFERENCE_API_KEY
 systemctl restart vulnigo
 ```
 
 This installs Docker, gVisor, the sandbox image, a systemd service running as a dedicated user, Caddy and a firewall.
+Optional first step for a locked-down VM (admin user, key-only SSH): `ADMIN_USER=you bash deploy/provision.sh "<ssh pubkey>"`.
+Then record the containment moment: `sudo bash sandbox/containment.sh`. Full step-by-step: [`deploy/RUNBOOK.md`](deploy/RUNBOOK.md).
 
 ### Project structure
 
@@ -192,7 +194,8 @@ vulnigo/patcher.py     patch generation/validation; approval-gated apply
 vulnigo/report.py      evidence-based report and score arithmetic
 vulnigo/store.py       SQLite evidence store
 demo_repo/             intentionally vulnerable target (FileDesk) with its own tests
-deploy/                setup.sh, sandbox image, systemd unit
+deploy/                setup.sh, provision.sh (optional VM hardening), RUNBOOK.md, systemd unit
+sandbox/               sandbox image, guard.sh, containment.sh + attack probes (recorded containment moment)
 tests/                 test suite
 ```
 
