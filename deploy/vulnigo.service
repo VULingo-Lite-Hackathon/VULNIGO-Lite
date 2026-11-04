@@ -1,0 +1,18 @@
+[Unit]
+Description=VULNIGO Lite backend
+After=network-online.target docker.service
+Requires=docker.service
+
+[Service]
+User=vulnigo
+Group=vulnigo
+WorkingDirectory=/opt/vulnigo
+EnvironmentFile=/opt/vulnigo/.env
+ExecStart=/opt/vulnigo/.venv/bin/uvicorn vulnigo.main:app --host 127.0.0.1 --port 8000 --proxy-headers
+Restart=on-failure
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+
+[Install]
+WantedBy=multi-user.target

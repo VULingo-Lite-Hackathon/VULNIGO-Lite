@@ -15,6 +15,42 @@ back to the evidence behind it.
 
 <!-- ![VULNIGO Lite command centre](docs/images/command-centre.png) -->
 
+> **Hackathon:** Vultr Agent Rush (lablab.ai), Challenge 1 — *Blast Radius Zero*. Submission deadline
+> 9 Nov 2026, 04:00 PKT.
+
+---
+
+## Project status — where we stand (updated 4 Nov 2026)
+
+| Area | Status | Notes |
+| --- | --- | --- |
+| Repo intake + URL validation | ✅ Done | Only `https://github.com/<owner>/<repo>` is accepted. Clone runs with hooks, submodules, symlinks and non-https protocols disabled. Commit hash is recorded. |
+| Battle state machine | ✅ Done | Every transition from the blueprint (plus `MANAGER_ANALYSING`) is enforced in code. Illegal jumps such as `DEFENDING → PATCHING` raise errors. |
+| Docker sandbox runner | ✅ Code done · ⏳ not yet run on Vultr | `--network none`, nobody user, read-only root fs and code mount, caps dropped, CPU/mem/PID/time limits, optional gVisor (`runsc`). |
+| Containment probe ("containment moment") | ✅ Code done · ⏳ verify on VM | Before any repo code runs, the probe tries network, DNS, writing to the source, writing to `/etc`, the Docker socket, reading env secrets and root access. The UI shows each attempt as blocked or allowed. |
+| Security engine (CWE-78, Python) | ✅ Done | AST taint scanner, bounded proof harness (random token written to `/tmp`), benign-input check, project pytest as regression. |
+| Demo target repo (`demo_repo/`, FileDesk) | ✅ Done | One planted command injection in `filedesk/tools.py:10`, plus tests that must keep passing after the fix. |
+| Red / Blue / Manager / Backup agents | ✅ Done · ⏳ awaiting Vultr inference key | Use Vultr Serverless Inference (OpenAI-compatible). Without a key they run a deterministic fallback, labelled as such everywhere. |
+| Patch approval gate | ✅ Done | Approve, request changes (2 revisions max) or reject. `patcher.apply` refuses to run without an approval record. |
+| Retest + verdicts | ✅ Done | Fixed and retested / Unresolved / Inconclusive, decided only from test runs. |
+| Repo Check mode | ✅ Done | Static and read-only: 14 rule families for malicious code and likely vulnerabilities. Everything is graded Potential. |
+| Pixel-art command centre | ✅ First version | Canvas rooms and agents, speech bubbles, live SSE feed, turn forms, diff approval, pointers, report modal. Needs a visual polish pass. |
+| Evidence store + report + scores | ✅ Done | SQLite. Every score line cites a test or patch id. |
+| Tests | ✅ 26 passing | `pytest tests` covers URL rejection, the state machine, scanner/patch and full battles against a simulated sandbox. |
+| Vultr VM deployment | ⏳ Blocked | Waiting on the Vultr API key. `deploy/setup.sh` is ready. |
+| Demo video, slides, lablab submission | ⏳ To do | Needs a live public URL first. |
+
+**Next steps:** create the Vultr VM → run `deploy/setup.sh` → add the inference key → run real sandboxed battles
+end to end on the VM → UI polish → record the demo (including the containment moment) → submit.
+
+## Built on Vultr
+
+| Vultr service | How VULNIGO uses it |
+| --- | --- |
+| **Cloud Compute VM** (Ubuntu) | Runs everything: FastAPI battle controller, SQLite evidence store, Caddy (HTTPS) and the Docker daemon. It is the single control layer that every agent call and every execution passes through. |
+| **Serverless Inference** (`api.vultrinference.com/v1`) | Every agent LLM call: Red (pick and explain a finding), Blue (root cause and patch), Manager (summary and Repo Check triage), Backup (coaching). Red and Blue are assigned models from different families when available. |
+| **Sandbox on the VM** | A disposable Docker container per test (optionally gVisor `runsc`). Throwaway, no network, no secrets, resource-capped, and destroyed after each test. Working copies are deleted after each battle. |
+
 ---
 
 ## At a glance
@@ -92,12 +128,12 @@ CREATED → REPOSITORY_VALIDATING → SANDBOX_READY
 
 | Layer | Choice |
 | --- | --- |
-| Frontend | Canvas-based pixel-art command centre, SSE event stream |
+| Frontend | Vanilla JS canvas pixel-art command centre (no build step), SSE event stream, served by the backend |
 | Backend | Python + FastAPI — REST plus event stream, state machine in plain code |
-| Agent orchestration | LangGraph with provider adapters; Pydantic-validated structured outputs |
-| Security tools | Deterministic scanner and targeted proof tests; pytest for regression |
-| Sandbox | Docker, non-root, network disabled, CPU/memory/PID/time limits, read-only source plus separate writable copy |
-| Storage | SQLite for state and evidence, file storage for logs and diffs |
+| Agent orchestration | Plain async Python over an OpenAI-compatible client (Vultr Serverless Inference); Pydantic-validated structured outputs; per-battle call budget |
+| Security tools | AST taint scanner and bounded proof harness (CWE-78); benign-input check; project pytest for regression |
+| Sandbox | Docker (optionally gVisor), non-root, network disabled, CPU/memory/PID/time limits, read-only source snapshot plus separate working copy |
+| Storage | SQLite for state, evidence, diffs and test output |
 
 Model output is untrusted input at every boundary. Responses are schema-validated — `finding_summary`,
 `file_path`, `line_range`, `confidence`, `test_plan`, `observed_result`, `patch_diff`, `limitations` — and each
@@ -107,37 +143,65 @@ as correctness.
 
 ## Quick start
 
-**Prerequisites:** Docker, Python 3.11+, Node.js 20+.
+**Prerequisites:** Python 3.11+. Docker is needed for real sandboxed tests (Linux; the Vultr VM).
 
 ```sh
-git clone https://github.com/<org>/vulnigo-lite.git
-cd vulnigo-lite
-
-cp .env.example backend/.env      # model credentials live in the backend process only
-docker compose up --build         # sandbox image and backend
-uvicorn backend.app.main:app --reload
-
-npm --prefix frontend install
-npm --prefix frontend run dev     # command centre
+git clone https://github.com/AssemblyAI-VoiceAgent-Hackathon/VULNIGO-Lite.git
+cd VULNIGO-Lite
+pip install -r requirements.txt
+cp .env.example .env                      # put VULTR_INFERENCE_API_KEY here; backend process only, never the sandbox
+docker build -t vulnigo-sandbox:latest -f deploy/sandbox.Dockerfile deploy
+uvicorn vulnigo.main:app --reload         # http://localhost:8000
 ```
 
-Open the command centre, choose **Demo repository**, and pick a mode. `GET /health` confirms the backend is up.
+Open the command centre, choose **Prepared demo repo**, and pick a mode. `GET /health` reports whether the
+sandbox and Vultr inference are available. Without Docker, every test is reported as **inconclusive** (never
+confirmed). Without an inference key, agents run a labelled deterministic fallback.
 
 ```sh
-pytest -q                         # scanner, proof test and regression suite
+pytest tests -q                           # intake, state machine, scanner/patch, full battles (simulated sandbox)
 ```
+
+### Deploy to a Vultr VM
+
+On a fresh Ubuntu 22.04/24.04 Vultr Cloud Compute instance (1 vCPU / 2 GB is enough), as root:
+
+```sh
+git clone https://github.com/AssemblyAI-VoiceAgent-Hackathon/VULNIGO-Lite.git && cd VULNIGO-Lite
+DOMAIN=your.domain.example bash deploy/setup.sh   # omit DOMAIN to serve plain HTTP on the VM's IP
+nano /opt/vulnigo/.env                            # set VULTR_INFERENCE_API_KEY
+systemctl restart vulnigo
+```
+
+This installs Docker, gVisor, the sandbox image, a systemd service running as a dedicated user, Caddy and a firewall.
 
 ### Project structure
 
 ```
-frontend/    pixel-art command centre and event stream client
-backend/     FastAPI battle controller: state machine, approvals, event stream
-agents/      Red, Blue, Manager and Backup agents; prompts, adapters, call budgets
-sandbox/     repository intake, URL validation, container lifecycle
-security/    vulnerability class, demo repository, scanner, proof and regression tests
-evidence/    state and evidence store, report generation, score arithmetic
-docs/        design documents, screenshots, demo script
+frontend/              pixel-art command centre (canvas renderer, SSE client, approval/turn/report UI)
+vulnigo/main.py        FastAPI app: REST endpoints + SSE event stream, rate limiting
+vulnigo/battle.py      battle controller: state machine driver, approvals, human turns, Need Backup
+vulnigo/state.py       allowed state transitions
+vulnigo/agents.py      Red, Blue, Manager, Backup agents; schemas, call budget, labelled fallbacks
+vulnigo/llm.py         Vultr Serverless Inference client, model selection
+vulnigo/intake.py      GitHub URL validation, safe clone, snapshot + working copy, cleanup
+vulnigo/sandbox.py     Docker sandbox runner with allowlisted actions only
+vulnigo/harness/       code that runs inside the sandbox: proof test, containment probe
+vulnigo/scanner.py     CWE-78 taint scanner + Repo Check rules
+vulnigo/patcher.py     patch generation/validation; approval-gated apply
+vulnigo/report.py      evidence-based report and score arithmetic
+vulnigo/store.py       SQLite evidence store
+demo_repo/             intentionally vulnerable target (FileDesk) with its own tests
+deploy/                setup.sh, sandbox image, systemd unit
+tests/                 test suite
 ```
+
+### API
+
+`POST /battles` · `POST /battles/{id}/mode` · `POST /battles/{id}/messages` · `POST /battles/{id}/backup` ·
+`POST /battles/{id}/approvals` · `POST /battles/{id}/actions` (participant turns) ·
+`POST /battles/{id}/pointers/{pid}` · `GET /battles/{id}` · `GET /battles/{id}/events` (SSE) ·
+`GET /battles/{id}/report` · `POST /repo-checks` · `GET /repo-checks/{id}` · `GET /health`
 
 ## Demo walkthrough
 
