@@ -1,0 +1,103 @@
+#!/usr/bin/env bash
+# vulnigo-sandbox -- the ONLY way the backend may start a container.
+#
+# Installed to /usr/local/bin and granted to the service user through one sudoers
+# line. The backend cannot run arbitrary docker commands: it may call this program,
+# which accepts only a job id and one of two fixed modes, and which hardcodes every
+# isolation flag.
+#
+#   vulnigo-sandbox <job-id> proof      runs /job/proof.py inside the sandbox
+#   vulnigo-sandbox <job-id> selftest   runs the boundary probe
+#   vulnigo-sandbox --print-config      prints the enforced limits as JSON
+
+set -euo pipefail
+
+# Constants, deliberately NOT read from the environment: a compromised or buggy
+# backend must not be able to loosen the boundary by setting a variable.
+IMAGE="vulnigo-sandbox:latest"
+JOBS_DIR="/var/lib/vulnigo/jobs"
+PROBES_DIR="/opt/vulnigo/sandbox/probes"
+DOCKER="/usr/bin/docker"
+MEMORY="512m"
+CPUS="1"
+PIDS="128"
+WALL_TIMEOUT="90"
+NETWORK="none"
+TMPFS_SIZE="64m"
+NOFILE="256"
+
+if [[ "${1:-}" == "--print-config" ]]; then
+  printf '{"image":"%s","network":"%s","memory":"%s","cpus":"%s","pids":"%s","timeout_s":%s,"read_only":true,"capabilities_dropped":"all","user":"65534:65534","no_new_privileges":true}\n' \
+    "${IMAGE}" "${NETWORK}" "${MEMORY}" "${CPUS}" "${PIDS}" "${WALL_TIMEOUT}"
+  exit 0
+fi
+
+JOB_ID="${1:-}"
+MODE="${2:-}"
+
+if [[ ! "${JOB_ID}" =~ ^[A-Za-z0-9_-]{1,40}$ ]]; then
+  echo "refused: job id must be 1-40 characters of A-Z a-z 0-9 _ -" >&2
+  exit 2
+fi
+
+case "${MODE}" in
+  proof)
+    SCRIPT_IN_CONTAINER="/job/proof.py"
+    ;;
+  selftest)
+    SCRIPT_IN_CONTAINER="/probe/selftest.py"
+    ;;
+  *)
+    echo "refused: mode must be proof | selftest" >&2
+    exit 2
+    ;;
+esac
+
+JOB_PATH="${JOBS_DIR}/${JOB_ID}"
+
+if [[ -L "${JOB_PATH}" ]]; then
+  echo "refused: job path may not be a symlink" >&2
+  exit 2
+fi
+
+REAL_JOB="$(realpath -- "${JOB_PATH}" 2>/dev/null || true)"
+if [[ "${REAL_JOB}" != "${JOBS_DIR}/"* || ! -d "${REAL_JOB}" ]]; then
+  echo "refused: job path must be a real directory under the jobs root" >&2
+  exit 2
+fi
+
+if [[ "${MODE}" == "proof" && ! -f "${REAL_JOB}/proof.py" ]]; then
+  echo "refused: the job directory has no proof.py" >&2
+  exit 2
+fi
+
+# --network=none        no route out, and no route to the cloud metadata address
+# --read-only           the root filesystem cannot be modified or destroyed
+# --memory/--cpus/--pids-limit   resource and process caps
+# --user 65534 --cap-drop=ALL    nobody, with no privileges left to drop into
+# --security-opt=no-new-privileges   setuid tricks gain nothing
+# --stop-signal=SIGKILL   a container that ignores TERM still dies
+exec "${DOCKER}" run \
+  --rm \
+  --interactive=false \
+  --detach=false \
+  --network="${NETWORK}" \
+  --read-only \
+  --memory="${MEMORY}" \
+  --memory-swap="${MEMORY}" \
+  --cpus="${CPUS}" \
+  --pids-limit="${PIDS}" \
+  --ulimit nofile="${NOFILE}:${NOFILE}" \
+  --cap-drop=ALL \
+  --security-opt=no-new-privileges:true \
+  --stop-signal=SIGKILL \
+  --user 65534:65534 \
+  --workdir /job \
+  --tmpfs "/tmp:rw,noexec,nosuid,size=${TMPFS_SIZE}" \
+  --volume "${REAL_JOB}:/job:ro" \
+  --volume "${PROBES_DIR}:/probe:ro" \
+  --label "vulnigo.job=${JOB_ID}" \
+  --label "vulnigo.mode=${MODE}" \
+  --entrypoint /usr/local/bin/guard.sh \
+  "${IMAGE}" \
+  "${WALL_TIMEOUT}" "${SCRIPT_IN_CONTAINER}"
