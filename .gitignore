@@ -1,21 +1,9 @@
-# Secrets - never commit
-.env
-.env.*
-!.env.example
-*.pem
-id_*
-
-# Python
 __pycache__/
 *.pyc
 .venv/
-venv/
-
-# Node
+backend/.env
+.env
+*.log
 node_modules/
-dist/
 
-# Runtime data
-data/
-*.sqlite
-*.db
+.pytest_cache/
