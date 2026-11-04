@@ -1,0 +1,94 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>VULNIGO Lite - Command Centre</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Press+Start+2P&family=JetBrains+Mono:wght@400;700&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+<header class="topbar">
+  <div class="brand"><span class="logo">VULNIGO</span> <span class="lite">LITE</span></div>
+  <div class="chips">
+    <span class="chip" id="chip-sandbox">SANDBOX ?</span>
+    <span class="chip" id="chip-llm">MODELS ?</span>
+    <span class="chip state" id="chip-state">IDLE</span>
+  </div>
+  <button class="btn ghost" id="btn-new" hidden>New run</button>
+</header>
+
+<!-- Start screen -->
+<section id="start" class="start">
+  <div class="card start-card">
+    <h1>Gamified repository security</h1>
+    <p class="muted">An AI agent's claim is not evidence. Red attacks, Blue defends, the Manager keeps score -
+      and only sandboxed test results decide what happened.</p>
+
+    <label class="lbl">Repository</label>
+    <div class="repo-row">
+      <label class="radio"><input type="radio" name="repo" value="demo" checked> Prepared demo repo (FileDesk)</label>
+      <label class="radio"><input type="radio" name="repo" value="url"> GitHub URL</label>
+    </div>
+    <input id="repo-url" class="input" placeholder="https://github.com/owner/repo" disabled>
+    <p class="hint">Battles actively test code: only use repositories you own or are authorised to assess.
+      Lite supports one class: Python command injection (CWE-78).</p>
+
+    <label class="lbl">Mode</label>
+    <div class="modes">
+      <button class="mode" data-mode="spectator"><b>Spectator</b><span>Watch Red and Blue fight. Approve pointers and the final patch.</span></button>
+      <button class="mode" data-mode="red"><b>Join Red</b><span>Play the attacker. Need Backup when stuck.</span></button>
+      <button class="mode" data-mode="blue"><b>Join Blue</b><span>Play the defender. Write or review the fix.</span></button>
+      <button class="mode" data-mode="check"><b>Repo Check</b><span>Static, read-only scan for malicious code and likely vulns. No battle.</span></button>
+    </div>
+    <p class="error" id="start-error"></p>
+  </div>
+</section>
+
+<!-- Battle screen -->
+<main id="arena" class="arena" hidden>
+  <section class="stage-col">
+    <div class="stage-wrap" id="stage-wrap">
+      <canvas id="stage" width="480" height="270"></canvas>
+      <div id="bubbles"></div>
+    </div>
+    <div class="round-bar" id="round-bar">
+      <span data-r="setup">SETUP</span><span data-r="attack">ROUND 1 - ATTACK</span>
+      <span data-r="defense">ROUND 2 - DEFENSE</span><span data-r="report">REPORT</span>
+    </div>
+    <div class="card" id="turn" hidden></div>
+    <div class="card" id="approval" hidden></div>
+    <div class="card containment" id="containment" hidden></div>
+  </section>
+
+  <aside class="side-col">
+    <div class="card meta" id="meta"></div>
+    <div class="card">
+      <div class="card-head"><h3>Live feed</h3><span class="muted small" id="feed-count"></span></div>
+      <ol class="feed" id="feed"></ol>
+    </div>
+    <div class="card" id="chat-card">
+      <div class="card-head"><h3>Team chat</h3>
+        <button class="btn warn small" id="btn-backup" hidden>NEED BACKUP</button></div>
+      <form id="chat-form" class="chat-form">
+        <input id="chat-input" class="input" maxlength="1000" placeholder="Suggest something to your team...">
+        <button class="btn">Send</button>
+      </form>
+    </div>
+    <div class="card" id="pointers-card" hidden>
+      <div class="card-head"><h3>Manager pointers</h3><span class="muted small">approve one by one</span></div>
+      <ul class="pointers" id="pointers"></ul>
+    </div>
+  </aside>
+</main>
+
+<!-- Report -->
+<div class="modal" id="report-modal" hidden>
+  <div class="modal-body card" id="report"></div>
+</div>
+
+<script src="/static/sprites.js"></script>
+<script src="/static/app.js"></script>
+</body>
+</html>
