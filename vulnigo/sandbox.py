@@ -23,6 +23,7 @@ HARNESS = Path(__file__).resolve().parent / "harness"
 _docker_ok: bool | None = None
 MAX_OUTPUT_BYTES = 64 * 1024  # per run; more than any real test report needs
 CAP_NOTICE = "\n[output cut at 64 KB]"
+KILL_TIMEOUT_S = 20  # how long `docker kill` may take before the backend stops waiting for it
 
 
 async def docker_available() -> bool:
@@ -113,16 +114,21 @@ async def _drain(stream, limit: int) -> tuple[bytes, bool]:
 
 
 async def _kill(proc, kill_name: str | None) -> None:
-    if kill_name:
-        k = await asyncio.create_subprocess_exec("docker", "kill", kill_name,
-                                                 stdout=asyncio.subprocess.DEVNULL,
-                                                 stderr=asyncio.subprocess.DEVNULL)
-        await k.wait()
+    # The docker client goes first. After a cut nobody reads its output, and the daemon can block writing to it;
+    # a `docker kill` sent while that client is alive waits behind the block (seen with a flooding test on Docker Desktop).
     try:
         proc.kill()
     except ProcessLookupError:
         pass
     await proc.wait()
+    if kill_name:
+        k = await asyncio.create_subprocess_exec("docker", "kill", kill_name,
+                                                 stdout=asyncio.subprocess.DEVNULL,
+                                                 stderr=asyncio.subprocess.DEVNULL)
+        try:
+            await asyncio.wait_for(k.wait(), KILL_TIMEOUT_S)
+        except asyncio.TimeoutError:
+            k.kill()
 
 
 async def _exec(argv: list[str], env: dict | None, cwd: str | None, timeout: int,
