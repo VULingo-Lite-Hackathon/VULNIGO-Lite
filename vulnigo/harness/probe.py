@@ -37,8 +37,13 @@ def docker_socket():
     raise FileNotFoundError("no docker socket mounted")
 
 
+# Set by the official python image: the public key ID that verifies Python release tarballs. Not a secret.
+IMAGE_PUBLIC_VARS = {"GPG_KEY"}
+
+
 def secrets_in_env():
-    leaked = [k for k in os.environ if any(s in k.upper() for s in ("KEY", "TOKEN", "SECRET", "PASSWORD", "VULTR"))]
+    leaked = [k for k in os.environ
+              if k not in IMAGE_PUBLIC_VARS and any(s in k.upper() for s in ("KEY", "TOKEN", "SECRET", "PASSWORD", "VULTR"))]
     if leaked:
         return "secret-like env vars present: " + ", ".join(leaked)
     raise PermissionError("no secret-like environment variables")
