@@ -1,0 +1,31 @@
+# Replace with your real domain's A record pointing at this VM, then:
+#   sudo apt install -y caddy && sudo systemctl enable --now caddy
+# Caddy provisions HTTPS automatically once DNS resolves here.
+#
+# While you have no domain yet, use the ip_only block instead of the site block
+# (HTTP, no certificate) and switch over when the domain is bought.
+
+vulnigo.example.com {
+	encode gzip
+
+	handle /api/* {
+		reverse_proxy 127.0.0.1:8000
+	}
+
+	handle /health {
+		reverse_proxy 127.0.0.1:8000
+	}
+
+	handle {
+		root * /opt/vulnigo/frontend
+		try_files {path} /index.html
+		file_server
+	}
+
+	header {
+		X-Content-Type-Options nosniff
+		X-Frame-Options DENY
+		Referrer-Policy no-referrer
+		-Server
+	}
+}
