@@ -54,7 +54,7 @@ sudo -u vulnigo python3 -m venv "$APP_DIR/.venv"
 sudo -u vulnigo "$APP_DIR/.venv/bin/pip" install -q -r "$APP_DIR/requirements.txt"
 
 echo "==> sandbox image"
-docker build -t vulnigo-sandbox:latest -f "$APP_DIR/deploy/sandbox.Dockerfile" "$APP_DIR/deploy"
+docker build -t vulnigo-sandbox:latest "$APP_DIR/sandbox"
 
 echo "==> service"
 cp "$APP_DIR/deploy/vulnigo.service" /etc/systemd/system/vulnigo.service
@@ -75,11 +75,18 @@ $SITE {
   reverse_proxy 127.0.0.1:8000 {
     flush_interval -1
   }
+  header {
+    X-Content-Type-Options nosniff
+    X-Frame-Options DENY
+    Referrer-Policy no-referrer
+    -Server
+  }
 }
 EOF
 systemctl reload caddy || systemctl restart caddy
 
 echo "==> firewall"
+ufw default deny incoming >/dev/null; ufw default allow outgoing >/dev/null
 ufw allow OpenSSH >/dev/null; ufw allow 80/tcp >/dev/null; ufw allow 443/tcp >/dev/null; ufw --force enable >/dev/null
 
 sleep 2
