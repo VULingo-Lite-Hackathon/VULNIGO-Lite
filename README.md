@@ -1,4 +1,4 @@
-# VULNIGO Lite
+# VULNIGO LITE
 
 **Gamified repository security — watch AI attack and defend a codebase, join a side yourself, or ask for an honest check of your own.**
 
