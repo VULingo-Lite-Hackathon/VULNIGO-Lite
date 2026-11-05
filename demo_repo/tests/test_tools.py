@@ -17,6 +17,14 @@ def test_missing_file_returns_none(tmp_path, monkeypatch):
     assert tools.file_size("nope.txt") is None
 
 
+def test_read_upload_returns_text(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    os.mkdir("uploads")
+    with open("uploads/notes.txt", "w") as f:
+        f.write("hi")
+    assert tools.read_upload("notes.txt") == "hi"
+
+
 def test_safe_name():
     assert tools.safe_name("a.txt")
     assert not tools.safe_name("../etc/passwd")

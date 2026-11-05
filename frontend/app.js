@@ -203,12 +203,12 @@
       try { await api("POST", `${base()}/actions`, payload); box.hidden = true; } catch (e) { alert(e.message); }
     };
     if (what === "red_attack") {
-      const sel = el("select", { class: "input" }, ...S.candidates.map((c) => el("option", { value: c.i }, `[${c.i}] ${c.file}:${c.line} ${c.function}() - ${c.flow}`)));
+      const sel = el("select", { class: "input" }, ...S.candidates.map((c) => el("option", { value: c.i }, `[${c.i}] ${c.category === "path-traversal" ? "PATH TRAVERSAL" : "CMD INJECTION"} ${c.file}:${c.line} ${c.function}() - ${c.flow}`)));
       const hyp = el("input", { class: "input", placeholder: "Your hypothesis (optional)", maxlength: 500 });
-      const pay = el("input", { class: "input", placeholder: "Payload, e.g.  x; echo PWNED > /tmp/vulnigo_proof #", maxlength: 300 });
+      const pay = el("input", { class: "input", placeholder: "Payload, e.g.  x; echo PWNED > /tmp/vulnigo_proof #   or   ../../vulnigo_secret.txt", maxlength: 300 });
       box.replaceChildren(el("h2", {}, "Your move - Red team"), el("p", { class: "muted" }, prompt),
         el("div", { class: "form-grid" }, el("label", { class: "small muted" }, "Target candidate"), sel, hyp, pay,
-          el("p", { class: "hint" }, "Your payload runs inside the no-network sandbox. It counts only if it makes the target write to /tmp/vulnigo_proof.")),
+          el("p", { class: "hint" }, "Your payload runs inside the no-network sandbox. Command injection counts only if the target writes to /tmp/vulnigo_proof; path traversal counts only if it returns the planted vulnigo_secret.txt token.")),
         el("div", { class: "btn-row" },
           el("button", { class: "btn red", onclick: () => done({ candidate_index: +sel.value, hypothesis: hyp.value || null, payload: pay.value || null }) }, "Run my attack"),
           el("button", { class: "btn ghost", onclick: () => done({ proceed: true }) }, "Let Red Agent proceed")));
@@ -308,6 +308,10 @@
             el("td", {}, el("span", { class: "pill " + t.outcome }, t.outcome)),
             el("td", {}, t.sandboxed ? `sandbox ${t.env}` : t.env === "UNSANDBOXED-DEV" ? "UNSANDBOXED DEV" : "not run")))),
         r.unresolved.length ? el("div", {}, el("h3", {}, "Unresolved"), el("ul", {}, ...r.unresolved.map((u) => el("li", {}, u)))) : null,
+        r.final_state === "NO_CONFIRMED_FINDING" && !/FileDesk/.test(r.repository || "") ? el("div", { class: "scope" },
+          "Lite battles prove two Python bug classes (command injection, path traversal); this repo showed neither. ",
+          "To see the full attack, patch and retest loop, run the prepared demo repo.",
+          el("div", { class: "btn-row" }, el("button", { class: "btn", onclick: () => { history.replaceState(null, "", "/"); location.reload(); } }, "Try the FileDesk demo"))) : null,
         el("p", { class: "disclaimer" }, r.disclaimer)));
     }
     $("#report-modal").hidden = false;

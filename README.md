@@ -28,15 +28,15 @@ back to the evidence behind it.
 | Battle state machine | ✅ Done | Every transition from the blueprint (plus `MANAGER_ANALYSING`) is enforced in code. Illegal jumps such as `DEFENDING → PATCHING` raise errors. |
 | Docker sandbox runner | ✅ Code done · ⏳ not yet run on Vultr | `--network none`, nobody user, read-only root fs and code mount, caps dropped, CPU/mem/PID/time limits, optional gVisor (`runsc`). |
 | Containment probe ("containment moment") | ✅ Code done · ⏳ verify on VM | Before any repo code runs, the probe tries network, DNS, writing to the source, writing to `/etc`, the Docker socket, reading env secrets and root access. The UI shows each attempt as blocked or allowed. `sandbox/containment.sh` additionally fires a fork bomb, memory bomb, `rm -rf /`, egress/metadata and infinite-loop attack at the image and records HELD/BREACH. |
-| Security engine (CWE-78, Python) | ✅ Done | AST taint scanner, bounded proof harness (random token written to `/tmp`), benign-input check, project pytest as regression. |
-| Demo target repo (`demo_repo/`, FileDesk) | ✅ Done | One planted command injection in `filedesk/tools.py:10`, plus tests that must keep passing after the fix. |
+| Security engine (Python: CWE-78 + CWE-22) | ✅ Done | AST taint scanners for command injection and path traversal; bounded proof harness (CWE-78: random token written to `/tmp`; CWE-22: planted token file read back via `../`); benign-input check; project pytest as regression. |
+| Demo target repo (`demo_repo/`, FileDesk) | ✅ Done | Two planted bugs in `filedesk/tools.py`: command injection in `file_size()` and path traversal in `read_upload()`, plus tests that must keep passing after the fix. |
 | Red / Blue / Manager / Backup agents | ✅ Done · ⏳ awaiting Vultr inference key | Use Vultr Serverless Inference (OpenAI-compatible). Without a key they run a deterministic fallback, labelled as such everywhere. |
 | Patch approval gate | ✅ Done | Approve, request changes (2 revisions max) or reject. `patcher.apply` refuses to run without an approval record. |
 | Retest + verdicts | ✅ Done | Fixed and retested / Unresolved / Inconclusive, decided only from test runs. |
 | Repo Check mode | ✅ Done | Static and read-only: 14 rule families for malicious code and likely vulnerabilities. Everything is graded Potential. |
 | Pixel-art command centre | ✅ First version | Canvas rooms and agents, speech bubbles, live SSE feed, turn forms, diff approval, pointers, report modal. Needs a visual polish pass. |
 | Evidence store + report + scores | ✅ Done | SQLite. Every score line cites a test or patch id. |
-| Tests | ✅ 26 passing | `pytest tests` covers URL rejection, the state machine, scanner/patch and full battles against a simulated sandbox. |
+| Tests | ✅ 56 passing | `pytest tests` covers URL rejection, the state machine, scanner/patch and full battles against a simulated sandbox. |
 | Vultr VM deployment | ⏳ Blocked | Waiting on the Vultr API key. `deploy/setup.sh` is ready. |
 | Demo video, slides, lablab submission | ⏳ To do | Needs a live public URL first. |
 
@@ -131,7 +131,7 @@ CREATED → REPOSITORY_VALIDATING → SANDBOX_READY
 | Frontend | Vanilla JS canvas pixel-art command centre (no build step), SSE event stream, served by the backend |
 | Backend | Python + FastAPI — REST plus event stream, state machine in plain code |
 | Agent orchestration | Plain async Python over an OpenAI-compatible client (Vultr Serverless Inference); Pydantic-validated structured outputs; per-battle call budget |
-| Security tools | AST taint scanner and bounded proof harness (CWE-78); benign-input check; project pytest for regression |
+| Security tools | AST taint scanners and bounded proof harness (CWE-78 command injection, CWE-22 path traversal); benign-input check; project pytest for regression |
 | Sandbox | Docker (optionally gVisor), non-root, network disabled, CPU/memory/PID/time limits, read-only source snapshot plus separate working copy |
 | Storage | SQLite for state, evidence, diffs and test output |
 
@@ -189,7 +189,7 @@ vulnigo/llm.py         Vultr Serverless Inference client, model selection
 vulnigo/intake.py      GitHub URL validation, safe clone, snapshot + working copy, cleanup
 vulnigo/sandbox.py     Docker sandbox runner with allowlisted actions only
 vulnigo/harness/       code that runs inside the sandbox: proof test, containment probe
-vulnigo/scanner.py     CWE-78 taint scanner + Repo Check rules
+vulnigo/scanner.py     CWE-78 / CWE-22 taint scanners + Repo Check rules
 vulnigo/patcher.py     patch generation/validation; approval-gated apply
 vulnigo/report.py      evidence-based report and score arithmetic
 vulnigo/store.py       SQLite evidence store
@@ -238,7 +238,7 @@ Check. VULNIGO Lite is a learning and validation tool, not an assurance product.
 
 ## Beyond Lite
 
-Lite deliberately ships one vulnerability class, one complete battle loop and one Manager analysis pass rather
+Lite deliberately ships two vulnerability classes, one complete battle loop and one Manager analysis pass rather
 than a broad surface. Deferred: multiple specialised agents per team, additional vulnerability classes and
 language coverage, competitive multiplayer and tournaments, progression systems such as XP and achievements,
 and deployment of approved patches to real environments.
