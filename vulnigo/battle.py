@@ -264,8 +264,13 @@ async def _battle(run: Run) -> None:
                 forced_idx = act["candidate_index"]
             custom_payload = (act.get("payload") or "")[:300] or None
 
-    res = await agents.red_analyse(candidates, run.budget, run.notes["red"])
-    idx = forced_idx if forced_idx is not None else res.data["candidate_index"]
+    if forced_idx is not None:
+        # The human picked the target: the agent writes the hypothesis for that candidate, not its own favourite.
+        res = await agents.red_analyse([candidates[forced_idx]], run.budget, run.notes["red"])
+        res.data["candidate_index"] = forced_idx
+    else:
+        res = await agents.red_analyse(candidates, run.budget, run.notes["red"])
+    idx = res.data["candidate_index"]
     cand = candidates[idx]
     run.candidate = cand
     hypothesis = res.data["finding_summary"]

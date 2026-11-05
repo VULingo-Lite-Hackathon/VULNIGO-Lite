@@ -208,3 +208,13 @@ def test_pick_model_skips_non_chat_models(monkeypatch):
     blue = asyncio.run(llm.pick_model("blue"))
     assert red == "deepseek-v4.1-flash-1017"
     assert blue == "qwen3.8-27b"
+
+
+def test_agent_output_is_fitted_not_discarded():
+    from vulnigo import agents
+    raw = {"root_cause": "x" * 2000, "line_start": 1, "line_end": 2, "replacement": "y",
+           "risks": "one risk", "assumptions": ["a"] * 9, "limitations": ["first", "second"]}
+    out = agents.BlueOut.model_validate(agents._fit(raw, agents.BlueOut))
+    assert len(out.root_cause) <= 800 and out.root_cause.endswith("...")
+    assert out.risks == ["one risk"] and len(out.assumptions) == 6
+    assert out.limitations == "first; second"

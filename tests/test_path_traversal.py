@@ -105,4 +105,5 @@ def test_red_participant_picks_traversal_and_blue_fixes_it(fake_sandbox):  # noq
     assert run.state == S.COMPLETED
     f = store.list_for("findings", run.id)[0]
     assert f["category"] == "path-traversal" and f["function"] == "read_upload" and f["status"] == "fixed"
+    assert "read_upload" in f["hypothesis"] and "file_size" not in f["hypothesis"]
     assert "os.path.basename(filename)" in store.list_for("patches", run.id)[0]["diff"]

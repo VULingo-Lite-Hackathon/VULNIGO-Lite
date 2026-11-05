@@ -73,6 +73,26 @@ class SummaryOut(BaseModel):
     summary: str = Field(max_length=1500)
 
 
+def _fit(raw, schema: type[BaseModel]):
+    """Trim over-long strings and lists to the schema's limits instead of discarding a good answer for verbosity."""
+    if not isinstance(raw, dict):
+        return raw
+    out = dict(raw)
+    for name, field in schema.model_fields.items():
+        limit = next((m.max_length for m in field.metadata if getattr(m, "max_length", None)), None)
+        v = out.get(name)
+        # Models mix up "a sentence" and "a list of sentences"; accept either shape.
+        if field.annotation is str and isinstance(v, list):
+            v = out[name] = "; ".join(str(x) for x in v)
+        elif getattr(field.annotation, "__origin__", None) is list and isinstance(v, str):
+            v = out[name] = [v]
+        if limit and isinstance(v, str) and len(v) > limit:
+            out[name] = v[:limit - 3].rstrip() + "..."
+        elif limit and isinstance(v, list) and len(v) > limit:
+            out[name] = v[:limit]
+    return out
+
+
 async def _call(role: str, budget: Budget, system: str, user: str, schema: type[BaseModel]):
     if not llm.enabled():
         return None, None, "no Vultr inference key configured"
@@ -80,7 +100,7 @@ async def _call(role: str, budget: Budget, system: str, user: str, schema: type[
         return None, None, "model call budget for this battle is used up"
     try:
         raw, model = await llm.chat_json(role, SAFETY + "\n" + system, user)
-        return schema.model_validate(raw), model, None
+        return schema.model_validate(_fit(raw, schema)), model, None
     except (llm.LLMError, ValidationError) as e:
         return None, None, f"live model call failed ({str(e)[:120]})"
 
