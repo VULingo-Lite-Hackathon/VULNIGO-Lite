@@ -236,8 +236,12 @@ async def _battle(run: Run) -> None:
          data={"candidates": [{"i": i, "file": c["file"], "line": c["line_start"], "function": c["function"],
                                "flow": c["data_flow"]} for i, c in enumerate(candidates)]})
     if not candidates:
+        py = (info.get("meta") or {}).get("python_files", 0)
+        why = ("the repository has no Python files; Lite battles only test Python command injection (CWE-78) - "
+               "try Repo Check for a static scan of other languages" if not py
+               else "the scanner found no command-injection candidates")
         transition(run, S.FINDINGS_REVIEW, "no candidates")
-        transition(run, S.NO_CONFIRMED_FINDING, "the scanner found no command-injection candidates")
+        transition(run, S.NO_CONFIRMED_FINDING, why)
         agent_status(run, "red", "completed", "nothing found")
         return await _finish(run)
 

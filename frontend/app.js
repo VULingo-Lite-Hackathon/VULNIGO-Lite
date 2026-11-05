@@ -15,6 +15,8 @@
     for (const k of kids.flat()) if (k !== null && k !== undefined && k !== false) n.append(k.nodeType ? k : String(k));
     return n;
   }
+  // replaceChildren() renders null as the text "null"; drop empty slots first.
+  const kidsOf = (...k) => k.flat().filter((x) => x !== null && x !== undefined && x !== false);
   async function api(method, path, body) {
     const r = await fetch(path, { method, headers: { "Content-Type": "application/json" }, body: body ? JSON.stringify(body) : undefined });
     const data = await r.json().catch(() => ({}));
@@ -275,7 +277,7 @@
     const close = el("button", { class: "btn ghost small", onclick: () => ($("#report-modal").hidden = true) }, "Close");
     if (r.kind === "repo_check") {
       const items = [...r.malicious, ...r.vulnerabilities];
-      body.replaceChildren(el("div", { class: "card-head" }, el("h2", {}, "Repo Check report"), close),
+      body.replaceChildren(...kidsOf(el("div", { class: "card-head" }, el("h2", {}, "Repo Check report"), close),
         el("p", {}, `${r.repository} @ ${r.commit_hash}`),
         el("div", { class: "outcome " + (items.length ? "meh" : "good") }, r.verdict),
         r.manager_summary ? el("p", {}, r.manager_summary) : null,
@@ -284,13 +286,13 @@
           ...items.map((f) => el("tr", {}, el("td", {}, f.grade), el("td", {}, `${f.kind} (${f.severity})`),
             el("td", {}, `${f.file}:${f.line_start}`), el("td", {}, f.explanation + (f.assessment ? " - " + f.assessment : "")),
             el("td", {}, el("code", {}, f.snippet))))) : null,
-        el("p", { class: "disclaimer" }, r.disclaimer));
+        el("p", { class: "disclaimer" }, r.disclaimer)));
     } else {
       const cls = r.final_state === "COMPLETED" ? "good" : ["UNRESOLVED", "FAILED", "PATCH_FAILED"].includes(r.final_state) ? "bad" : "meh";
       const scoreBox = (team) => el("div", { class: "score " + team }, el("h3", {}, team.toUpperCase() + " TEAM"),
         el("div", { class: "big" }, r.scores[team].total),
         el("ul", {}, ...r.scores[team].lines.map((l) => el("li", {}, `${l.points > 0 ? "+" : ""}${l.points} ${l.why} `, el("span", { class: "muted" }, `[${l.evidence || "-"}]`)))));
-      body.replaceChildren(el("div", { class: "card-head" }, el("h2", {}, "Battle report"), close),
+      body.replaceChildren(...kidsOf(el("div", { class: "card-head" }, el("h2", {}, "Battle report"), close),
         el("p", {}, `${r.repository} @ ${r.commit_hash || "-"}`),
         el("div", { class: "outcome " + cls }, r.outcome),
         r.manager_summary && r.manager_summary.text ? el("p", {}, r.manager_summary.text, el("span", { class: "label" + (/FALLBACK/.test(r.manager_summary.label) ? " fallback" : "") }, r.manager_summary.label)) : null,
@@ -306,7 +308,7 @@
             el("td", {}, el("span", { class: "pill " + t.outcome }, t.outcome)),
             el("td", {}, t.sandboxed ? `sandbox ${t.env}` : t.env === "UNSANDBOXED-DEV" ? "UNSANDBOXED DEV" : "not run")))),
         r.unresolved.length ? el("div", {}, el("h3", {}, "Unresolved"), el("ul", {}, ...r.unresolved.map((u) => el("li", {}, u)))) : null,
-        el("p", { class: "disclaimer" }, r.disclaimer));
+        el("p", { class: "disclaimer" }, r.disclaimer)));
     }
     $("#report-modal").hidden = false;
   }
