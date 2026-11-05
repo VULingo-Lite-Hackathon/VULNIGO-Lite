@@ -69,23 +69,34 @@ def _extract_json(text: str) -> dict:
         raise LLMError(f"model returned invalid JSON: {e}") from e
 
 
-async def chat_json(role: str, system: str, user: str, max_tokens: int = 1200) -> tuple[dict, str]:
+async def chat_json(role: str, system: str, user: str, max_tokens: int | None = None) -> tuple[dict, str]:
     """Return (parsed_json, model_id). Raises LLMError on any failure - callers fall back honestly."""
     if not enabled():
         raise LLMError("no inference key configured")
     try:
         model = await pick_model(role)
+        body = {"model": model, "temperature": 0.2, "max_tokens": max_tokens or config.LLM_MAX_TOKENS,
+                "messages": [{"role": "system", "content": system}, {"role": "user", "content": user}]}
+        if not config.LLM_THINKING:
+            body["chat_template_kwargs"] = {"enable_thinking": False}
         async with httpx.AsyncClient(timeout=config.LLM_TIMEOUT) as c:
             r = await c.post(f"{config.INFERENCE_BASE_URL}/chat/completions",
-                             headers={"Authorization": f"Bearer {config.INFERENCE_KEY}"},
-                             json={"model": model, "temperature": 0.2, "max_tokens": max_tokens,
-                                   "messages": [{"role": "system", "content": system},
-                                                {"role": "user", "content": user}]})
+                             headers={"Authorization": f"Bearer {config.INFERENCE_KEY}"}, json=body)
+            if r.status_code == 400 and "chat_template_kwargs" in body:  # a model that rejects the switch
+                body.pop("chat_template_kwargs")
+                r = await c.post(f"{config.INFERENCE_BASE_URL}/chat/completions",
+                                 headers={"Authorization": f"Bearer {config.INFERENCE_KEY}"}, json=body)
         if r.status_code >= 400:
             raise LLMError(f"inference HTTP {r.status_code}: {r.text[:200]}")
-        content = r.json()["choices"][0]["message"]["content"] or ""
+        choice = r.json()["choices"][0]
+        content = choice["message"]["content"] or ""
     except httpx.HTTPError as e:
         raise LLMError(f"inference request failed: {type(e).__name__}") from e
     except (KeyError, IndexError, ValueError) as e:
         raise LLMError("unexpected inference response shape") from e
-    return _extract_json(content), model
+    try:
+        return _extract_json(content), model
+    except LLMError as e:
+        if choice.get("finish_reason") == "length":
+            raise LLMError("model ran out of tokens before finishing its JSON") from e
+        raise

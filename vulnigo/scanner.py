@@ -1,6 +1,7 @@
 """Deterministic static checks. Pass/fail decisions never come from model opinion.
 
-* `scan_command_injection` - the one vulnerability class Lite battles support (CWE-78, Python).
+* `scan_command_injection` / `scan_path_traversal` - the classes Lite battles prove in the sandbox
+  (CWE-78 command injection and CWE-22 path traversal, Python).
 * `scan_repo_check` - wider static heuristics for Repo Check (malicious code + likely vulns).
 Neither function executes repository code; they only parse/read text.
 """
@@ -123,6 +124,133 @@ def scan_command_injection(root: Path) -> list[dict]:
     return out
 
 
+# ---------------------------------------------------------------- CWE-22 path traversal (read sinks)
+# Calls that turn a user-supplied name into a bare file name; their result is no longer tainted.
+_PT_SANITIZERS = {"basename", "secure_filename", "abspath_within", "safe_join"}
+_READ_SINKS_PATH_METHODS = {"read_text", "read_bytes", "open"}
+
+
+def _is_sanitizer(node: ast.AST) -> bool:
+    """True if the expression strips directory parts: os.path.basename(x), secure_filename(x), Path(x).name."""
+    for n in ast.walk(node):
+        if isinstance(n, ast.Call):
+            f = n.func
+            name = f.attr if isinstance(f, ast.Attribute) else f.id if isinstance(f, ast.Name) else ""
+            if name in _PT_SANITIZERS:
+                return True
+        if isinstance(n, ast.Attribute) and n.attr == "name":
+            return True
+    return False
+
+
+def _pt_tainted_names(fn: ast.FunctionDef) -> dict[str, str]:
+    """Like _tainted_names, but an assignment through a sanitizer clears the taint."""
+    params = [a.arg for a in fn.args.args + fn.args.kwonlyargs if a.arg not in ("self", "cls")]
+    taint = {p: p for p in params}
+    assigns = sorted((n for n in ast.walk(fn) if isinstance(n, ast.Assign)), key=lambda n: n.lineno)
+    for node in assigns:
+        targets = [t.id for t in node.targets if isinstance(t, ast.Name)]
+        if _is_sanitizer(node.value):
+            for t in targets:
+                taint.pop(t, None)
+            continue
+        src = next((taint[n] for n in sorted(_names(node.value)) if n in taint), None)
+        for t in targets:
+            if src:
+                taint[t] = src
+    # A comparison such as `os.path.basename(name) != name` is a guard written for exactly this bug.
+    for cmp in (n for n in ast.walk(fn) if isinstance(n, ast.Compare)):
+        for call in (n for n in ast.walk(cmp) if isinstance(n, ast.Call) and n.args):
+            f = call.func
+            fname = f.attr if isinstance(f, ast.Attribute) else f.id if isinstance(f, ast.Name) else ""
+            if fname == "basename" and isinstance(call.args[0], ast.Name):
+                guarded = call.args[0].id
+                for k in [k for k, v in taint.items() if v == guarded]:
+                    taint.pop(k, None)
+    return taint
+
+
+def _open_mode_reads(call: ast.Call) -> bool:
+    mode = call.args[1] if len(call.args) > 1 else next((k.value for k in call.keywords if k.arg == "mode"), None)
+    if mode is None:
+        return True
+    return isinstance(mode, ast.Constant) and isinstance(mode.value, str) and not set(mode.value) & set("wax+")
+
+
+def _read_sink(call: ast.Call) -> tuple[str, ast.AST] | None:
+    """Return (sink name, path expression) for calls that read a file from a path."""
+    f = call.func
+    name = _call_name(call)
+    if name in ("open", "io.open", "codecs.open") and call.args and _open_mode_reads(call):
+        return name + "()", call.args[0]
+    if name in ("send_file", "flask.send_file") and call.args:
+        return name + "()", call.args[0]
+    if isinstance(f, ast.Attribute) and f.attr in _READ_SINKS_PATH_METHODS:
+        recv = f.value  # Path(x).read_text(), (BASE / x).read_text()
+        if isinstance(recv, (ast.Call, ast.BinOp)):
+            if f.attr == "open" and not _open_mode_reads(call):
+                return None
+            return f"Path.{f.attr}()", recv
+    return None
+
+
+def scan_path_traversal(root: Path) -> list[dict]:
+    """Find file-read sinks whose path comes from a function parameter without a basename-style sanitizer."""
+    out: list[dict] = []
+    for path in iter_files(root, (".py",)):
+        rel = path.relative_to(root).as_posix()
+        if "/tests/" in "/" + rel or rel.startswith("test_") or "/test_" in rel:
+            continue
+        try:
+            src = path.read_text(encoding="utf-8", errors="replace")
+            tree = ast.parse(src)
+        except (SyntaxError, ValueError):
+            continue
+        lines = src.splitlines()
+        top_level = {n.name for n in tree.body if isinstance(n, ast.FunctionDef)}
+        for fn in [n for n in ast.walk(tree) if isinstance(n, ast.FunctionDef)]:
+            taint = _pt_tainted_names(fn)
+            params = [a.arg for a in fn.args.args if a.arg not in ("self", "cls")]
+            for call in [n for n in ast.walk(fn) if isinstance(n, ast.Call)]:
+                sink = _read_sink(call)
+                if not sink:
+                    continue
+                sink_name, arg = sink
+                if isinstance(arg, ast.Constant) or _is_sanitizer(arg):
+                    continue
+                hit = sorted({taint[n] for n in _names(arg) if n in taint})
+                if not hit:
+                    continue
+                param = hit[0]
+                via = [v for v in sorted(_names(arg)) if v in taint and v != param]
+                flow = f"parameter `{param}` of {fn.name}()"
+                if via:
+                    flow += " -> " + " -> ".join(f"`{v}`" for v in via)
+                flow += f" -> {sink_name} (file path, no basename check)"
+                start, end = call.lineno, getattr(call, "end_lineno", call.lineno)
+                out.append({
+                    "category": "path-traversal",
+                    "cwe": "CWE-22",
+                    "file": rel,
+                    "line_start": start,
+                    "line_end": end,
+                    "function": fn.name,
+                    "param": param,
+                    "params": params,
+                    "sink": sink_name,
+                    "top_level": fn.name in top_level,
+                    "data_flow": flow,
+                    "snippet": "\n".join(lines[max(0, fn.lineno - 1):end]),
+                    "fn_line": fn.lineno,
+                })
+    return out
+
+
+def scan_battle_candidates(root: Path) -> list[dict]:
+    """Every candidate a battle can prove in the sandbox, command injection first (higher impact)."""
+    return scan_command_injection(root) + scan_path_traversal(root)
+
+
 # ---------------------------------------------------------------- Repo Check heuristics
 _TEXT_EXTS = (".py", ".js", ".mjs", ".cjs", ".ts", ".sh", ".bash", ".rb", ".php", ".go", ".json",
               ".yml", ".yaml", ".toml", ".cfg", ".ini", ".env", ".txt", ".ps1", ".bat")
@@ -219,11 +347,17 @@ def scan_repo_check(root: Path) -> dict:
                          "file": ci["file"], "line_start": ci["line_start"], "line_end": ci["line_end"],
                          "snippet": sink_line[:200],
                          "explanation": "Function parameter reaches a shell command: " + ci["data_flow"]})
+    for pt in scan_path_traversal(root):
+        sink_line = pt["snippet"].splitlines()[-1].strip() if pt["snippet"] else ""
+        findings.append({"category": "vulnerability", "kind": "path-traversal", "severity": "high",
+                         "file": pt["file"], "line_start": pt["line_start"], "line_end": pt["line_end"],
+                         "snippet": sink_line[:200],
+                         "explanation": "Function parameter reaches a file read: " + pt["data_flow"]})
     seen, uniq = set(), []
     for f in findings:
         key = (f["file"], f["line_start"], f["kind"])
         if key not in seen:
             seen.add(key)
             uniq.append(f)
-    rules = [k for _, k, *_ in LINE_RULES] + ["install-hook", "command-injection"]
+    rules = [k for _, k, *_ in LINE_RULES] + ["install-hook", "command-injection", "path-traversal"]
     return {"files_scanned": scanned, "findings": uniq, "rules": rules}

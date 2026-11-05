@@ -205,6 +205,7 @@ async def _intake(run: Run) -> bool:
         agent_status(run, "manager", "failed", str(e))
         return False
     run.paths = {"source": info["source"], "work": info["work"]}
+    run.meta = info["meta"]
     store.update("runs", "id", run.id, commit_hash=info["commit_hash"], repo_label=info["label"], meta=info["meta"])
     emit(run, "manager", "info", f"Snapshot of {info['label']} at {info['commit_hash'][:24]} "
          f"({info['meta']['files']} files, {info['meta']['python_files']} Python).", data=info["meta"])
@@ -230,16 +231,18 @@ async def _battle(run: Run) -> None:
     # ---- Round 1: attack
     run.round = "attack"
     transition(run, S.ATTACKING)
-    agent_status(run, "red", "running", "scanning for command injection")
-    candidates = scanner.scan_command_injection(Path(run.paths["source"]))
-    emit(run, "red", "info", f"Deterministic scanner: {len(candidates)} candidate(s) for CWE-78 command injection.",
+    agent_status(run, "red", "running", "scanning for command injection and path traversal")
+    candidates = scanner.scan_battle_candidates(Path(run.paths["source"]))
+    n_ci = sum(c["category"] == "command-injection" for c in candidates)
+    emit(run, "red", "info", f"Deterministic scanner: {n_ci} command-injection (CWE-78) and "
+         f"{len(candidates) - n_ci} path-traversal (CWE-22) candidate(s).",
          data={"candidates": [{"i": i, "file": c["file"], "line": c["line_start"], "function": c["function"],
-                               "flow": c["data_flow"]} for i, c in enumerate(candidates)]})
+                               "category": c["category"], "flow": c["data_flow"]} for i, c in enumerate(candidates)]})
     if not candidates:
-        py = (info.get("meta") or {}).get("python_files", 0)
-        why = ("the repository has no Python files; Lite battles only test Python command injection (CWE-78) - "
-               "try Repo Check for a static scan of other languages" if not py
-               else "the scanner found no command-injection candidates")
+        py = (getattr(run, "meta", None) or {}).get("python_files", 0)
+        why = ("the repository has no Python files; Lite battles test Python code only (CWE-78 command injection, "
+               "CWE-22 path traversal) - try Repo Check for a static scan of other languages" if not py
+               else "the scanner found no command-injection or path-traversal candidates")
         transition(run, S.FINDINGS_REVIEW, "no candidates")
         transition(run, S.NO_CONFIRMED_FINDING, why)
         agent_status(run, "red", "completed", "nothing found")
@@ -252,7 +255,8 @@ async def _battle(run: Run) -> None:
             await _backup_say(run)
         act = await wait_human(run, "red_attack",
                                "Your move, Red: pick a candidate, add a hypothesis, optionally write a payload "
-                               "(it must write to /tmp/vulnigo_proof), or let the Red Agent proceed.")
+                               "(command injection: make it write to /tmp/vulnigo_proof; path traversal: make it "
+                               "read ../../vulnigo_secret.txt), or let the Red Agent proceed.")
         if act:
             if act.get("hypothesis"):
                 run.notes["red"].append(act["hypothesis"])
@@ -260,8 +264,13 @@ async def _battle(run: Run) -> None:
                 forced_idx = act["candidate_index"]
             custom_payload = (act.get("payload") or "")[:300] or None
 
-    res = await agents.red_analyse(candidates, run.budget, run.notes["red"])
-    idx = forced_idx if forced_idx is not None else res.data["candidate_index"]
+    if forced_idx is not None:
+        # The human picked the target: the agent writes the hypothesis for that candidate, not its own favourite.
+        res = await agents.red_analyse([candidates[forced_idx]], run.budget, run.notes["red"])
+        res.data["candidate_index"] = forced_idx
+    else:
+        res = await agents.red_analyse(candidates, run.budget, run.notes["red"])
+    idx = res.data["candidate_index"]
     cand = candidates[idx]
     run.candidate = cand
     hypothesis = res.data["finding_summary"]
@@ -272,7 +281,7 @@ async def _battle(run: Run) -> None:
 
     agent_status(run, "red", "running", "running bounded proof test in sandbox")
     spec = {"file": cand["file"], "function": cand["function"], "param": cand["param"], "params": cand["params"],
-            "token": "VG" + secrets.token_hex(6)}
+            "category": cand["category"], "token": "VG" + secrets.token_hex(6)}
     proof = await sandbox.run(run.id, "proof", run.paths["source"], spec, is_demo=run.is_demo, label="attack proof")
     _emit_test(run, "red", proof)
     human_proof = None
@@ -285,7 +294,7 @@ async def _battle(run: Run) -> None:
     status = "confirmed" if "pass" in outcomes else ("unconfirmed" if "fail" in outcomes else "inconclusive")
     evidence_test = next((t for t in (proof, human_proof) if t and t["outcome"] == "pass"), proof)
     fid = store.new_id("fd")
-    store.insert("findings", {"id": fid, "run_id": run.id, "category": "command-injection", "file": cand["file"],
+    store.insert("findings", {"id": fid, "run_id": run.id, "category": cand["category"], "file": cand["file"],
                               "line_start": cand["line_start"], "line_end": cand["line_end"],
                               "function": cand["function"], "param": cand["param"], "hypothesis": hypothesis,
                               "status": status, "test_ref": evidence_test["id"],
@@ -420,7 +429,8 @@ async def _defend(run: Run, revision: int) -> tuple[dict | None, str]:
         if act and act.get("replacement"):
             try:
                 p = patcher.from_replacement(work, f["file"], int(act.get("line_start", f["line_start"])),
-                                             int(act.get("line_end", f["line_end"])), act["replacement"][:3000])
+                                             int(act.get("line_end", f["line_end"])), act["replacement"][:3000],
+                                             f.get("category") or "command-injection")
                 patch, author = p, "human"
                 emit(run, "human", "info", "Participant wrote the patch.")
             except (patcher.PatchError, ValueError) as e:

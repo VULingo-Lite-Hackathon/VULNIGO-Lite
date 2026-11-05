@@ -115,3 +115,13 @@ table.tbl th { color: var(--muted); font-weight: 400; }
 .pill { font-size: 10px; padding: 1px 6px; border: 1px solid; }
 .pill.pass { color: #7be0aa; } .pill.fail { color: #ff9a9a; } .pill.inconclusive { color: #f2c464; }
 .disclaimer { font-size: 12px; color: var(--muted); border-top: 2px dashed var(--line); padding-top: 10px; margin-top: 14px; }
+
+/* Start screen: what a Lite battle can prove */
+.tag { font-family: var(--pix); font-size: 7px; padding: 3px 5px; margin-left: 6px; border: 2px solid var(--green);
+  color: #7be0aa; vertical-align: middle; }
+.scope { margin: 10px 0 4px; padding: 10px 12px; border: 2px solid var(--line); border-left: 4px solid var(--gold);
+  background: var(--panel2); font-size: 12px; color: var(--muted); }
+.scope b { color: var(--text); }
+.scope ul { margin: 6px 0; padding-left: 18px; }
+.scope code { color: var(--gold); }
+.scope .btn-row { margin-top: 8px; }

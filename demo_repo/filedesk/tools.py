@@ -1,4 +1,5 @@
 """Helpers used by the FileDesk web service."""
+import os
 import subprocess
 
 UPLOAD_DIR = "uploads"
@@ -11,6 +12,13 @@ def file_size(filename):
     if result.returncode != 0:
         return None
     return int(result.stdout.split()[0])
+
+
+def read_upload(filename):
+    """Return the text of an uploaded file, for the preview pane."""
+    path = os.path.join(UPLOAD_DIR, filename)
+    with open(path, encoding="utf-8") as f:
+        return f.read()
 
 
 def safe_name(filename):

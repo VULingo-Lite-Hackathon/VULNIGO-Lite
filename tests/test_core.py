@@ -40,7 +40,7 @@ def test_scanner_finds_planted_bug():
     found = scanner.scan_command_injection(DEMO)
     assert len(found) == 1
     f = found[0]
-    assert (f["file"], f["function"], f["param"], f["line_start"]) == ("filedesk/tools.py", "file_size", "filename", 10)
+    assert (f["file"], f["function"], f["param"], f["line_start"]) == ("filedesk/tools.py", "file_size", "filename", 11)
 
 
 def test_deterministic_fix_removes_shell():
@@ -81,7 +81,11 @@ def fake_sandbox(monkeypatch):
     state = {"break_regression": False}
 
     async def fake_run(run_id, action, code_dir, spec=None, is_demo=False, label=""):
-        vulnerable = "shell=True" in (Path(code_dir) / "filedesk/tools.py").read_text()
+        text = (Path(code_dir) / "filedesk/tools.py").read_text()
+        if (spec or {}).get("category") == "path-traversal":
+            vulnerable = "os.path.basename(filename) != filename" not in text
+        else:
+            vulnerable = "shell=True" in text
         outcome = {"probe": "pass", "proof": "pass" if vulnerable else "fail", "benign": "pass",
                    "regression": "fail" if state["break_regression"] else "pass"}[action]
         result = {"checks": [{"check": "net", "blocked": True, "detail": "x"}], "all_blocked": True} if action == "probe" else {"confirmed": vulnerable}
@@ -204,3 +208,13 @@ def test_pick_model_skips_non_chat_models(monkeypatch):
     blue = asyncio.run(llm.pick_model("blue"))
     assert red == "deepseek-v4.1-flash-1017"
     assert blue == "qwen3.8-27b"
+
+
+def test_agent_output_is_fitted_not_discarded():
+    from vulnigo import agents
+    raw = {"root_cause": "x" * 2000, "line_start": 1, "line_end": 2, "replacement": "y",
+           "risks": "one risk", "assumptions": ["a"] * 9, "limitations": ["first", "second"]}
+    out = agents.BlueOut.model_validate(agents._fit(raw, agents.BlueOut))
+    assert len(out.root_cause) <= 800 and out.root_cause.endswith("...")
+    assert out.risks == ["one risk"] and len(out.assumptions) == 6
+    assert out.limitations == "first; second"

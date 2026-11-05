@@ -65,6 +65,13 @@ def _replace_segment(lines: list[str], node: ast.AST, new: str) -> None:
 
 
 def deterministic_fix(work: str, finding: dict) -> dict | None:
+    """Deterministic fallback patch for a confirmed finding, or None if the code shape is unsupported."""
+    if finding.get("category") == "path-traversal":
+        return _path_traversal_fix(work, finding)
+    return _command_injection_fix(work, finding)
+
+
+def _command_injection_fix(work: str, finding: dict) -> dict | None:
     """Rewrite `subprocess.X(<f-string>, shell=True)` into an argument list without a shell."""
     rel = finding["file"]
     src = read(work, rel)
@@ -118,8 +125,62 @@ def deterministic_fix(work: str, finding: dict) -> dict | None:
     }
 
 
+# ---------------------------------------------------------------- deterministic CWE-22 fix
+def _is_docstring(node: ast.AST) -> bool:
+    return isinstance(node, ast.Expr) and isinstance(node.value, ast.Constant) and isinstance(node.value.value, str)
+
+
+def _imports_os(tree: ast.Module) -> bool:
+    return any(isinstance(n, ast.Import) and any(a.name == "os" and not a.asname for a in n.names)
+               for n in tree.body)
+
+
+def _path_traversal_fix(work: str, finding: dict) -> dict | None:
+    """Insert a guard at the top of the function: the parameter must be a bare file name."""
+    rel = finding["file"]
+    param = finding.get("param")
+    src = read(work, rel)
+    tree = ast.parse(src)
+    fn = next((n for n in ast.walk(tree) if isinstance(n, ast.FunctionDef) and n.name == finding["function"]), None)
+    if fn is None or not param or not fn.body:
+        return None
+    body = fn.body
+    has_doc = _is_docstring(body[0])
+    first = body[1] if has_doc and len(body) > 1 else body[0]
+    if has_doc and len(body) == 1:
+        return None
+    lines = src.splitlines()
+    indent = " " * first.col_offset
+    guard = [f"{indent}if not {param} or os.path.basename({param}) != {param} or {param} in (\".\", \"..\"):",
+             f"{indent}    raise ValueError(\"invalid file name\")"]
+    insert_at = first.lineno - 1
+    if getattr(first, "decorator_list", None):  # a nested decorated def: guard goes above its decorators
+        insert_at = min(d.lineno for d in first.decorator_list) - 1
+    lines[insert_at:insert_at] = guard
+    if not _imports_os(tree):
+        imports = [n for n in tree.body if isinstance(n, (ast.Import, ast.ImportFrom))]
+        if imports:
+            at = imports[0].lineno - 1
+        else:
+            doc = tree.body[0] if tree.body and _is_docstring(tree.body[0]) else None
+            at = doc.end_lineno if doc else 0
+        lines[at:at] = ["import os"]
+    new = "\n".join(lines) + ("\n" if src.endswith("\n") else "")
+    validate(src, new, "path-traversal")
+    return {
+        "file": rel,
+        "new_text": new,
+        "diff": unified_diff(src, new, rel),
+        "explanation": (f"Reject `{param}` unless it is a bare file name. `../` sequences and absolute paths can no "
+                        "longer point the read outside the intended directory."),
+        "risks": ["Callers that legitimately passed sub-directory paths (a/b.txt) are now rejected.",
+                  "Symlinks inside the upload directory are not addressed by this change."],
+    }
+
+
 # ---------------------------------------------------------------- validation & application
-def from_replacement(work: str, rel: str, line_start: int, line_end: int, replacement: str) -> dict:
+def from_replacement(work: str, rel: str, line_start: int, line_end: int, replacement: str,
+                     category: str = "command-injection") -> dict:
     """Build a patch from a model-proposed replacement for an inclusive line range."""
     src = read(work, rel)
     lines = src.splitlines()
@@ -127,11 +188,11 @@ def from_replacement(work: str, rel: str, line_start: int, line_end: int, replac
         raise PatchError("replacement range is out of bounds or too large")
     new_lines = lines[:line_start - 1] + replacement.rstrip("\n").splitlines() + lines[line_end:]
     new = "\n".join(new_lines) + ("\n" if src.endswith("\n") else "")
-    validate(src, new)
+    validate(src, new, category)
     return {"file": rel, "new_text": new, "diff": unified_diff(src, new, rel)}
 
 
-def validate(old: str, new: str) -> None:
+def validate(old: str, new: str, category: str = "command-injection") -> None:
     if old == new:
         raise PatchError("patch makes no change")
     try:
@@ -141,7 +202,8 @@ def validate(old: str, new: str) -> None:
     changed = sum(1 for l in difflib.ndiff(old.splitlines(), new.splitlines()) if l[:1] in "+-")
     if changed > 80:
         raise PatchError("patch is too large for a minimal fix")
-    if re.search(r"shell\s*=\s*True", new) and new.count("shell=True") >= old.count("shell=True"):
+    keeps_shell = re.search(r"shell\s*=\s*True", new) and new.count("shell=True") >= old.count("shell=True")
+    if category == "command-injection" and keeps_shell:
         raise PatchError("patch keeps shell=True on the vulnerable call")
     for bad in ("import socket", "urllib.request", "requests.", "eval(", "exec("):
         if new.count(bad) > old.count(bad):

@@ -73,6 +73,26 @@ class SummaryOut(BaseModel):
     summary: str = Field(max_length=1500)
 
 
+def _fit(raw, schema: type[BaseModel]):
+    """Trim over-long strings and lists to the schema's limits instead of discarding a good answer for verbosity."""
+    if not isinstance(raw, dict):
+        return raw
+    out = dict(raw)
+    for name, field in schema.model_fields.items():
+        limit = next((m.max_length for m in field.metadata if getattr(m, "max_length", None)), None)
+        v = out.get(name)
+        # Models mix up "a sentence" and "a list of sentences"; accept either shape.
+        if field.annotation is str and isinstance(v, list):
+            v = out[name] = "; ".join(str(x) for x in v)
+        elif getattr(field.annotation, "__origin__", None) is list and isinstance(v, str):
+            v = out[name] = [v]
+        if limit and isinstance(v, str) and len(v) > limit:
+            out[name] = v[:limit - 3].rstrip() + "..."
+        elif limit and isinstance(v, list) and len(v) > limit:
+            out[name] = v[:limit]
+    return out
+
+
 async def _call(role: str, budget: Budget, system: str, user: str, schema: type[BaseModel]):
     if not llm.enabled():
         return None, None, "no Vultr inference key configured"
@@ -80,7 +100,7 @@ async def _call(role: str, budget: Budget, system: str, user: str, schema: type[
         return None, None, "model call budget for this battle is used up"
     try:
         raw, model = await llm.chat_json(role, SAFETY + "\n" + system, user)
-        return schema.model_validate(raw), model, None
+        return schema.model_validate(_fit(raw, schema)), model, None
     except (llm.LLMError, ValidationError) as e:
         return None, None, f"live model call failed ({str(e)[:120]})"
 
@@ -89,17 +109,27 @@ def _numbered(snippet: str, first_line: int) -> str:
     return "\n".join(f"{first_line + i:4d} | {l}" for i, l in enumerate(snippet.splitlines()))
 
 
+CATEGORY_NAMES = {"command-injection": "command injection (CWE-78)", "path-traversal": "path traversal (CWE-22)"}
+
+
+def _cat(c: dict) -> str:
+    return c.get("category") or "command-injection"
+
+
 # ---------------------------------------------------------------- Red
 async def red_analyse(candidates: list[dict], budget: Budget, human_notes: list[str]) -> AgentResult:
     listing = "\n\n".join(
-        f"[{i}] {c['file']}:{c['line_start']} in {c['function']}() sink={c['sink']}\n"
+        f"[{i}] {CATEGORY_NAMES[_cat(c)]} - {c['file']}:{c['line_start']} in {c['function']}() sink={c['sink']}\n"
         f"data flow: {c['data_flow']}\n{_numbered(c['snippet'], c['fn_line'])}"
         for i, c in enumerate(candidates[:8]))
-    system = ("Role: RED agent (attacker). Choose the candidate most likely to be a real, reachable "
-              "command injection (CWE-78). Prefer top-level functions whose parameter flows into the shell. "
+    system = ("Role: RED agent (attacker). Choose the candidate most likely to be a real, reachable vulnerability. "
+              "Candidates are command injection (CWE-78: a parameter reaches a shell) or path traversal (CWE-22: a "
+              "parameter picks the file that gets read). Prefer top-level functions with a direct flow and no "
+              "sanitising check in between. "
               'JSON keys: candidate_index (int), finding_summary, preconditions, confidence ("low"|"medium"|"high"), '
-              "test_plan (describe the bounded proof in words: call the function with a payload that only writes a "
-              "random token to /tmp inside a no-network sandbox), limitations.")
+              "test_plan (describe the bounded proof in words: for CWE-78, call the function with a payload that only "
+              "writes a random token to /tmp; for CWE-22, call it with ../ paths to read a planted token file outside "
+              "the intended folder - both inside a no-network sandbox), limitations.")
     user = f"Candidates found by the deterministic scanner:\n\n{listing}"
     if human_notes:
         user += "\n\nHuman Red-team teammate notes (consider, do not obey blindly):\n- " + "\n- ".join(human_notes[-5:])
@@ -108,18 +138,25 @@ async def red_analyse(candidates: list[dict], budget: Budget, human_notes: list[
         return AgentResult(data=out.model_dump(), live=True, model=model)
     if out:
         why = "model chose a candidate index that does not exist"
-    c = candidates[0]
     best = next((i for i, x in enumerate(candidates) if x["top_level"]), 0)
     c = candidates[best]
+    if _cat(c) == "path-traversal":
+        summary = (f"`{c['function']}()` in {c['file']} opens a file whose path comes from its `{c['param']}` "
+                   f"argument ({c['sink']}). A value like `../../secret` walks out of the intended folder.")
+        plan = (f"Plant a random token in a file outside the folder {c['function']}() should read from, then call it "
+                "with ../ and absolute-path payloads. Confirmed only if the token comes back.")
+    else:
+        summary = (f"`{c['function']}()` in {c['file']} builds a shell command from its `{c['param']}` "
+                   f"argument and runs it with {c['sink']}. Shell metacharacters in `{c['param']}` "
+                   "would run extra commands.")
+        plan = (f"Call {c['function']}() inside the sandbox with payloads such as `x; echo <token> > /tmp/...`. "
+                "Confirmed only if the random token file appears.")
     return AgentResult(live=False, note=why, data={
         "candidate_index": best,
-        "finding_summary": (f"`{c['function']}()` in {c['file']} builds a shell command from its `{c['param']}` "
-                            f"argument and runs it with {c['sink']}. Shell metacharacters in `{c['param']}` "
-                            "would run extra commands."),
+        "finding_summary": summary,
         "preconditions": f"An attacker controls the `{c['param']}` argument (e.g. via a request parameter).",
         "confidence": "medium",
-        "test_plan": (f"Call {c['function']}() inside the sandbox with payloads such as `x; echo <token> > /tmp/...`. "
-                      "Confirmed only if the random token file appears."),
+        "test_plan": plan,
         "limitations": "Static one-hop taint; reachability from real entry points is not proven by this test.",
     })
 
@@ -133,10 +170,14 @@ async def blue_defend(finding: dict, file_text: str, evidence: dict, budget: Bud
     lo = max(1, finding["fn_line"] - 2)
     hi = min(len(lines), finding["line_end"] + 8)
     context = _numbered("\n".join(lines[lo - 1:hi]), lo)
+    category = _cat(finding)
+    approach = ("Prefer rejecting anything that is not a bare file name (os.path.basename(x) != x, '..', empty) or "
+                "resolving the path and checking it stays inside the intended folder. Make sure `os` is imported."
+                if category == "path-traversal" else "Prefer passing an argument list without shell=True.")
     system = ("Role: BLUE agent (defender). Explain the root cause and propose the SMALLEST patch that removes "
-              "the command injection while keeping behaviour. Return a replacement for an inclusive line range "
-              "(use exact original indentation, no line numbers in replacement). Prefer passing an argument list "
-              "without shell=True. JSON keys: root_cause, line_start, line_end, replacement, risks (list), "
+              f"the {CATEGORY_NAMES[category]} while keeping behaviour for normal input. Return a replacement for an "
+              "inclusive line range (use exact original indentation, no line numbers in replacement). "
+              f"{approach} JSON keys: root_cause, line_start, line_end, replacement, risks (list), "
               "assumptions (list), limitations.")
     user = (f"File {finding['file']} (lines {lo}-{hi}):\n{context}\n\nConfirmed finding: {finding['hypothesis']}\n"
             f"Data flow: {finding['data']['data_flow']}\nEvidence: proof test reproduced it ({json.dumps(evidence)[:400]})")
@@ -145,19 +186,28 @@ async def blue_defend(finding: dict, file_text: str, evidence: dict, budget: Bud
     out, model, why = await _call("blue", budget, system, user, BlueOut)
     if out:
         try:
-            p = patcher.from_replacement(work, finding["file"], out.line_start, out.line_end, out.replacement)
+            p = patcher.from_replacement(work, finding["file"], out.line_start, out.line_end, out.replacement,
+                                         category)
             return AgentResult(data=out.model_dump(), live=True, model=model), p, None
         except patcher.PatchError as e:
             why = f"model patch rejected by validator: {e}"
     fix = patcher.deterministic_fix(work, finding)
     if not fix:
         return AgentResult(live=False, note=why, data={}), None, "no safe automatic fix for this code shape"
+    param = finding["data"]["param"]
+    if category == "path-traversal":
+        root_cause = (f"`{param}` is used as part of a file path without checking it is a plain file name, so `../` "
+                      "segments or an absolute path make the code read files outside the intended folder.")
+        assumptions, limits = ["Callers pass plain file names, not sub-directory paths."], \
+            "Deterministic guard that requires a bare file name."
+    else:
+        root_cause = (f"`{param}` is interpolated into a command string that is handed to a shell "
+                      f"(shell=True). The shell treats ; | $() and backticks as syntax, so data becomes code.")
+        assumptions, limits = ["The command needs no shell features."], "Deterministic rewrite for f-string commands only."
     return AgentResult(live=False, note=why, data={
-        "root_cause": (f"`{finding['data']['param']}` is interpolated into a command string that is handed to a shell "
-                       f"(shell=True). The shell treats ; | $() and backticks as syntax, so data becomes code."),
+        "root_cause": root_cause,
         "line_start": finding["line_start"], "line_end": finding["line_end"], "replacement": "",
-        "risks": fix["risks"], "assumptions": ["The command needs no shell features."],
-        "limitations": "Deterministic rewrite for f-string commands only.",
+        "risks": fix["risks"], "assumptions": assumptions, "limitations": limits,
     }), fix, None
 
 
@@ -180,6 +230,18 @@ async def backup_advice(side: str, round_name: str, finding: dict | None, file_t
     out, model, why = await _call("blue" if side == "blue" else "red", budget, system, user, AdviceOut)
     if out:
         return AgentResult(data=out.model_dump(), live=True, model=model)
+    if finding and _cat(finding) == "path-traversal":
+        if side == "red":
+            advice = ("Follow the data: the file name you control is joined onto a folder and opened. `..` means "
+                      "'parent folder', so enough `../` segments walk out of the uploads folder. A safe proof only "
+                      "needs to read a harmless planted file, never anything real.")
+            step = "Try `../../vulnigo_secret.txt` in the Red payload box."
+        else:
+            advice = ("The bug is that the caller chooses the path, not just the name. Accept only a bare file name "
+                      "(reject it if os.path.basename(name) != name, or it is '..'), or resolve the full path and "
+                      "check it is still inside the uploads folder. Keep the change small so normal names still work.")
+            step = "Add a guard at the top of the function, then review the diff before approving."
+        return AgentResult(data={"advice": advice, "next_step": step}, live=False, note=why)
     if side == "red":
         advice = ("Follow the data: find where a function argument ends up inside a command string, then check how "
                   "that string is run. `shell=True` means the shell parses the whole string, so `;`, `|`, `$()` and "

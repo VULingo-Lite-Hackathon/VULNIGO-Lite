@@ -28,13 +28,21 @@
 
     <label class="lbl">Repository</label>
     <div class="repo-row">
-      <label class="radio"><input type="radio" name="repo" value="demo" checked> Prepared demo repo (FileDesk)</label>
+      <label class="radio"><input type="radio" name="repo" value="demo" checked> Prepared demo repo (FileDesk) <span class="tag">recommended</span></label>
       <label class="radio"><input type="radio" name="repo" value="url"> GitHub URL</label>
     </div>
     <input id="repo-url" class="input" placeholder="https://github.com/owner/repo" disabled>
-    <p class="hint">Battles actively test code: only use repositories you own or are authorised to assess.
-      Lite battles test one class: Python command injection (CWE-78). Repos with no Python code end with
-      "no confirmed finding"; use Repo Check for a static scan of other languages.</p>
+    <div class="scope">
+      <b>What a Lite battle can prove</b> (Python code):
+      <ul>
+        <li><b>Command injection</b> (CWE-78): input reaches a shell command.</li>
+        <li><b>Path traversal</b> (CWE-22): input chooses which file gets read (<code>../</code>).</li>
+      </ul>
+      FileDesk has one of each planted, so you see the full attack &rarr; patch &rarr; retest loop.
+      Your own repo works too, but if it has neither pattern the honest result is <i>no confirmed finding</i>.
+      Repo Check scans any language, statically.
+    </div>
+    <p class="hint">Battles actively test code: only use repositories you own or are authorised to assess.</p>
 
     <label class="lbl">Mode</label>
     <div class="modes">

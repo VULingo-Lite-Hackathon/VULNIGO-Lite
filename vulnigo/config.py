@@ -32,6 +32,10 @@ BLUE_MODEL = os.getenv("BLUE_MODEL", "")
 MANAGER_MODEL = os.getenv("MANAGER_MODEL", "")
 LLM_TIMEOUT = float(os.getenv("LLM_TIMEOUT", "60"))
 LLM_CALL_BUDGET = int(os.getenv("LLM_CALL_BUDGET", "12"))  # per battle
+# Reasoning models spend completion tokens "thinking" before the JSON; with a tight max_tokens the JSON gets cut.
+# Agents need a short structured answer, so thinking is off by default (the deterministic tests decide outcomes anyway).
+LLM_THINKING = os.getenv("LLM_THINKING", "0") == "1"
+LLM_MAX_TOKENS = int(os.getenv("LLM_MAX_TOKENS", "3000"))
 
 SANDBOX_IMAGE = os.getenv("SANDBOX_IMAGE", "vulnigo-sandbox:latest")
 SANDBOX_TIMEOUT = int(os.getenv("SANDBOX_TIMEOUT", "30"))

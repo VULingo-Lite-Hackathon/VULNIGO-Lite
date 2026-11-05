@@ -177,7 +177,7 @@ async def run(run_id: str, action: str, code_dir: str, spec: dict | None = None,
         # Dev-only path for the bundled demo repo on a machine without Docker. Clearly labelled.
         tmp = tempfile.mkdtemp(prefix="vg_dev_")
         local = [sys.executable] + [a.replace("/harness", str(HARNESS)).replace("/src", code_dir) for a in argv[1:]]
-        env = {"PATH": os.environ.get("PATH", ""), "VG_SRC": code_dir, "PYTHONDONTWRITEBYTECODE": "1",
+        env = {"PATH": os.environ.get("PATH", ""), "VG_SRC": code_dir, "VG_TMP": tmp, "PYTHONDONTWRITEBYTECODE": "1",
                "SYSTEMROOT": os.environ.get("SYSTEMROOT", "")}
         code, out, timed_out, truncated = await _exec(local, env, tmp, config.SANDBOX_TIMEOUT, None)
         shutil.rmtree(tmp, ignore_errors=True)
