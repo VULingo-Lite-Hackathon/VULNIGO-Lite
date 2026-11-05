@@ -187,3 +187,20 @@ def test_blue_participant_patch_and_backup(fake_sandbox):
     assert run.state == S.COMPLETED
     assert store.list_for("patches", run.id)[0]["author"] == "human"
     assert any(e["type"] == "backup" for e in store.list_for("events", run.id))
+
+
+def test_pick_model_skips_non_chat_models(monkeypatch):
+    import asyncio
+    from vulnigo import config, llm
+    listed = ["qwen3-asr-1.7b", "qwen3-tts-12hz-1.7b", "qwen3-embedding-4b", "qwen-image-2.1",
+              "deepseek-v4.1-flash-1017", "qwen3.8-27b", "whisper-large-v3-turbo"]
+
+    async def fake_list():
+        return listed
+    monkeypatch.setattr(llm, "list_models", fake_list)
+    for role in ("RED_MODEL", "BLUE_MODEL", "MANAGER_MODEL"):
+        monkeypatch.setattr(config, role, "")
+    red = asyncio.run(llm.pick_model("red"))
+    blue = asyncio.run(llm.pick_model("blue"))
+    assert red == "deepseek-v4.1-flash-1017"
+    assert blue == "qwen3.8-27b"

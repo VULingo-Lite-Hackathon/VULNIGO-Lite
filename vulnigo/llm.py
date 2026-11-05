@@ -29,7 +29,9 @@ async def list_models() -> list[str]:
     return _models_cache
 
 
-_PREFERRED = ("deepseek", "llama", "qwen", "mistral", "kimi", "gpt-oss")
+_PREFERRED = ("deepseek", "llama", "qwen", "glm", "minimax", "mistral", "kimi", "gpt-oss")
+# Non-chat models served by the same /v1/models endpoint (speech, audio, image, retrieval, safety classifiers).
+_NON_CHAT = re.compile(r"embed|whisper|tts|asr|speech|voxtral|chatterbox|music|ace-step|image|vision-only|rerank|retriever|safety|omni", re.I)
 
 
 async def pick_model(role: str) -> str:
@@ -37,7 +39,7 @@ async def pick_model(role: str) -> str:
     explicit = {"red": config.RED_MODEL, "blue": config.BLUE_MODEL, "manager": config.MANAGER_MODEL}.get(role)
     if explicit:
         return explicit
-    models = [m for m in await list_models() if not re.search(r"embed|whisper|tts|image|vision-only|rerank", m, re.I)]
+    models = [m for m in await list_models() if not _NON_CHAT.search(m)]
     if not models:
         raise LLMError("no chat models available on the inference endpoint")
     ranked = sorted(models, key=lambda m: next((i for i, p in enumerate(_PREFERRED) if p in m.lower()), 99))
