@@ -21,6 +21,9 @@ from . import config, store
 
 HARNESS = Path(__file__).resolve().parent / "harness"
 _docker_ok: bool | None = None
+MAX_OUTPUT_BYTES = 64 * 1024  # per run; more than any real test report needs
+CAP_NOTICE = "\n[output cut at 64 KB]"
+KILL_TIMEOUT_S = 20  # how long `docker kill` may take before the backend stops waiting for it
 
 
 async def docker_available() -> bool:
@@ -99,25 +102,61 @@ def _parse(output: str) -> dict | None:
     return None
 
 
+async def _drain(stream, limit: int) -> tuple[bytes, bool]:
+    """Read at most `limit` bytes. Returns (data, cut). Stops reading as soon as the limit is passed."""
+    buf = bytearray()
+    while chunk := await stream.read(65536):
+        room = limit - len(buf)
+        buf += chunk[:max(room, 0)]
+        if len(chunk) > room:
+            return bytes(buf), True
+    return bytes(buf), False
+
+
+async def _kill(proc, kill_name: str | None) -> None:
+    # The docker client goes first. After a cut nobody reads its output, and the daemon can block writing to it;
+    # a `docker kill` sent while that client is alive waits behind the block (seen with a flooding test on Docker Desktop).
+    try:
+        proc.kill()
+    except ProcessLookupError:
+        pass
+    await proc.wait()
+    if kill_name:
+        k = await asyncio.create_subprocess_exec("docker", "kill", kill_name,
+                                                 stdout=asyncio.subprocess.DEVNULL,
+                                                 stderr=asyncio.subprocess.DEVNULL)
+        try:
+            await asyncio.wait_for(k.wait(), KILL_TIMEOUT_S)
+        except asyncio.TimeoutError:
+            k.kill()
+
+
 async def _exec(argv: list[str], env: dict | None, cwd: str | None, timeout: int,
-                kill_name: str | None) -> tuple[int | None, str, bool]:
+                kill_name: str | None) -> tuple[int | None, str, bool, bool]:
+    """Run argv. Returns (exit code, output, timed_out, truncated).
+
+    Output is read as a stream and cut at MAX_OUTPUT_BYTES, so a program that prints forever
+    cannot fill the backend's memory. On a cut or a timeout the container is killed and the exit code is None.
+    """
     proc = await asyncio.create_subprocess_exec(*argv, env=env, cwd=cwd,
                                                 stdout=asyncio.subprocess.PIPE,
                                                 stderr=asyncio.subprocess.STDOUT)
+
+    async def collect() -> tuple[bytes, bool]:
+        out, cut = await _drain(proc.stdout, MAX_OUTPUT_BYTES)
+        if not cut:
+            await proc.wait()
+        return out, cut
+
     try:
-        out, _ = await asyncio.wait_for(proc.communicate(), timeout)
-        return proc.returncode, out.decode(errors="replace"), False
+        out, cut = await asyncio.wait_for(collect(), timeout)
     except asyncio.TimeoutError:
-        if kill_name:
-            k = await asyncio.create_subprocess_exec("docker", "kill", kill_name,
-                                                     stdout=asyncio.subprocess.DEVNULL,
-                                                     stderr=asyncio.subprocess.DEVNULL)
-            await k.wait()
-        try:
-            proc.kill()
-        except ProcessLookupError:
-            pass
-        return None, f"timed out after {timeout}s (killed)", True
+        await _kill(proc, kill_name)
+        return None, f"timed out after {timeout}s (killed)", True, False
+    if cut:
+        await _kill(proc, kill_name)
+        return None, out.decode(errors="replace") + CAP_NOTICE, False, True
+    return proc.returncode, out.decode(errors="replace"), False, False
 
 
 async def run(run_id: str, action: str, code_dir: str, spec: dict | None = None,
@@ -132,7 +171,7 @@ async def run(run_id: str, action: str, code_dir: str, spec: dict | None = None,
     sandboxed = await docker_available()
     if sandboxed:
         cmd = _docker_cmd(env_id, code_dir, argv)
-        code, out, timed_out = await _exec(cmd, None, None, config.SANDBOX_TIMEOUT + 10, env_id)
+        code, out, timed_out, truncated = await _exec(cmd, None, None, config.SANDBOX_TIMEOUT + 10, env_id)
         shown = " ".join(argv[:3]) + (" <spec>" if len(argv) > 3 and action != "regression" else " " + " ".join(argv[3:]))
     elif is_demo and config.ALLOW_UNSANDBOXED_DEMO:
         # Dev-only path for the bundled demo repo on a machine without Docker. Clearly labelled.
@@ -140,7 +179,7 @@ async def run(run_id: str, action: str, code_dir: str, spec: dict | None = None,
         local = [sys.executable] + [a.replace("/harness", str(HARNESS)).replace("/src", code_dir) for a in argv[1:]]
         env = {"PATH": os.environ.get("PATH", ""), "VG_SRC": code_dir, "PYTHONDONTWRITEBYTECODE": "1",
                "SYSTEMROOT": os.environ.get("SYSTEMROOT", "")}
-        code, out, timed_out = await _exec(local, env, tmp, config.SANDBOX_TIMEOUT, None)
+        code, out, timed_out, truncated = await _exec(local, env, tmp, config.SANDBOX_TIMEOUT, None)
         shutil.rmtree(tmp, ignore_errors=True)
         env_id = "UNSANDBOXED-DEV"
         shown = "[UNSANDBOXED DEV] " + " ".join(argv[:3])
@@ -153,16 +192,16 @@ async def run(run_id: str, action: str, code_dir: str, spec: dict | None = None,
         return store.insert("test_runs", row)
 
     parsed = _parse(out) if action != "regression" else None
-    outcome = _outcome(action, code, out, parsed, timed_out)
+    outcome = _outcome(action, code, out, parsed, timed_out, truncated)
     row = {"id": store.new_id("tr"), "run_id": run_id, "kind": action, "command": shown, "env_id": env_id,
            "exit_code": code, "output": out[-4000:], "started": started, "ended": time.time(),
            "outcome": outcome, "sandboxed": 1 if sandboxed else 0,
            "data": {"label": label, "result": parsed, "spec": {k: v for k, v in spec.items() if k != "token"},
-                    "timed_out": timed_out, "policy": describe_policy() if sandboxed else None}}
+                    "timed_out": timed_out, "truncated": truncated, "policy": describe_policy() if sandboxed else None}}
     return store.insert("test_runs", row)
 
 
-def _outcome(action: str, code, out: str, parsed: dict | None, timed_out: bool) -> str:
+def _outcome(action: str, code, out: str, parsed: dict | None, timed_out: bool, truncated: bool = False) -> str:
     """Map raw results to pass / fail / inconclusive. 'pass' always means 'the check succeeded'.
 
     proof:      pass = vulnerability reproduced, fail = not reproduced, inconclusive = could not run
@@ -170,7 +209,7 @@ def _outcome(action: str, code, out: str, parsed: dict | None, timed_out: bool) 
     regression: pass = pytest exit 0, fail = tests failed, inconclusive = no tests / error
     probe:      pass = every escape attempt was blocked
     """
-    if timed_out:
+    if timed_out or truncated:  # cut output can hold a forged or half-written result line
         return "inconclusive"
     if action == "regression":
         if code == 0:

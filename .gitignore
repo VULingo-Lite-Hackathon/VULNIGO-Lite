@@ -4,12 +4,17 @@
 !.env.example
 *.pem
 id_*
+vulnigo_vultr*
 
 # Python
 __pycache__/
 *.pyc
+.pytest_cache/
 .venv/
 venv/
+
+# Tool caches
+.codegraph/
 
 # Node
 node_modules/

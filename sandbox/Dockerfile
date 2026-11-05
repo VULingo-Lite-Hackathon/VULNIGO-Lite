@@ -7,7 +7,7 @@ FROM python:3.12-slim
 # the build if it is not.
 RUN set -eux; \
     ln -sf "$(command -v python3)" /usr/bin/python3; \
-    ln -sf "$(command -v timeout)" /usr/bin/timeout; \
+    [ -x /usr/bin/timeout ] || ln -sf "$(command -v timeout)" /usr/bin/timeout; \
     test -x /usr/bin/python3; \
     test -x /usr/bin/timeout; \
     /usr/bin/python3 -c 'import sys; print("interpreter", sys.version.split()[0])'

@@ -6,8 +6,9 @@ import sys
 refused = []
 
 
-def collect(path, error):
-    refused.append(f"{os.path.basename(str(path))}: {error}")
+def collect(func, path, exc_info):
+    # shutil.rmtree calls onerror(func, path, exc_info): three arguments.
+    refused.append(f"{os.path.basename(str(path))}: {exc_info[1]}")
 
 
 try:

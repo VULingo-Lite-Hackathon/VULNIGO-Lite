@@ -54,10 +54,14 @@ echo "host marker written $(date -Is)" > "${HOST_MARKER}"
 
 banner "0. build the sandbox image"
 attempt 4 docker build -t "${IMAGE}" "${HERE}"
-if [[ ${RC} -eq 0 ]] && assert_has 'interpreter 3\.'; then
-  held "image built, interpreter path verified at build time"
+BUILD_RC=${RC}
+# Run the interpreter instead of reading the build log: BuildKit prints cached or export
+# lines last, so the build's own "interpreter 3.x" line is not reliably in the output tail.
+attempt 1 docker run --rm --entrypoint /usr/bin/python3 "${IMAGE}" -c 'import sys; print("interpreter", sys.version.split()[0])'
+if [[ ${BUILD_RC} -eq 0 && ${RC} -eq 0 ]] && assert_has 'interpreter 3\.'; then
+  held "image built, interpreter path verified by running it"
 else
-  breach "build failed (exit ${RC}) -- fix this before anything else"
+  breach "build or interpreter check failed (build exit ${BUILD_RC}, run exit ${RC}) -- fix this before anything else"
 fi
 
 banner "1. destroy the filesystem  ->  read-only rootfs must refuse"
