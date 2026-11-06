@@ -73,6 +73,9 @@ class SummaryOut(BaseModel):
     summary: str = Field(max_length=1500)
 
 
+CODE_FIELDS = {"replacement"}
+
+
 def _fit(raw, schema: type[BaseModel]):
     """Trim over-long strings and lists to the schema's limits instead of discarding a good answer for verbosity."""
     if not isinstance(raw, dict):
@@ -83,7 +86,8 @@ def _fit(raw, schema: type[BaseModel]):
         v = out.get(name)
         # Models mix up "a sentence" and "a list of sentences"; accept either shape.
         if field.annotation is str and isinstance(v, list):
-            v = out[name] = "; ".join(str(x) for x in v)
+            # Code fields arrive as a list of lines; prose fields as a list of sentences.
+            v = out[name] = ("\n" if name in CODE_FIELDS else "; ").join(str(x) for x in v)
         elif getattr(field.annotation, "__origin__", None) is list and isinstance(v, str):
             v = out[name] = [v]
         if limit and isinstance(v, str) and len(v) > limit:
