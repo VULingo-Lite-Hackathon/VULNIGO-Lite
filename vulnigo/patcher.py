@@ -131,7 +131,8 @@ def _is_docstring(node: ast.AST) -> bool:
 
 
 def _imports_os(tree: ast.Module) -> bool:
-    return any(isinstance(n, ast.Import) and any(a.name == "os" and not a.asname for a in n.names)
+    # `import os.path` also binds the name `os`, so it counts.
+    return any(isinstance(n, ast.Import) and any(a.name in ("os", "os.path") and not a.asname for a in n.names)
                for n in tree.body)
 
 
@@ -159,7 +160,10 @@ def _path_traversal_fix(work: str, finding: dict) -> dict | None:
     lines[insert_at:insert_at] = guard
     if not _imports_os(tree):
         imports = [n for n in tree.body if isinstance(n, (ast.Import, ast.ImportFrom))]
-        if imports:
+        futures = [n for n in imports if isinstance(n, ast.ImportFrom) and n.module == "__future__"]
+        if futures:  # __future__ imports must stay first in the module
+            at = max(n.end_lineno for n in futures)
+        elif imports:
             at = imports[0].lineno - 1
         else:
             doc = tree.body[0] if tree.body and _is_docstring(tree.body[0]) else None
@@ -196,8 +200,9 @@ def validate(old: str, new: str, category: str = "command-injection") -> None:
     if old == new:
         raise PatchError("patch makes no change")
     try:
-        ast.parse(new)
-    except SyntaxError as e:
+        # compile, not just parse: it also rejects what only fails at load time (misplaced __future__ imports).
+        compile(new, "<patch>", "exec")
+    except (SyntaxError, ValueError) as e:
         raise PatchError(f"patched file does not parse: {e}") from e
     changed = sum(1 for l in difflib.ndiff(old.splitlines(), new.splitlines()) if l[:1] in "+-")
     if changed > 80:

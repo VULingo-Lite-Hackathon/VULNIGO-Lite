@@ -218,3 +218,13 @@ def test_agent_output_is_fitted_not_discarded():
     assert len(out.root_cause) <= 800 and out.root_cause.endswith("...")
     assert out.risks == ["one risk"] and len(out.assumptions) == 6
     assert out.limitations == "first; second"
+
+
+def test_fit_joins_list_replacement_with_newlines():
+    # issue #7: a model returning code as a list of lines must not get it glued with "; "
+    from vulnigo import agents
+    lines = ["if x:", "    raise ValueError", "return 1"]
+    raw = {"root_cause": ["guard x", "then return"], "line_start": 1, "line_end": 2, "replacement": lines}
+    out = agents.BlueOut.model_validate(agents._fit(raw, agents.BlueOut))
+    assert out.replacement == "\n".join(lines)
+    assert out.root_cause == "guard x; then return"
