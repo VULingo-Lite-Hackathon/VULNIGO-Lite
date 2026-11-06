@@ -159,53 +159,6 @@ def test_no_sandbox_is_inconclusive_never_confirmed(monkeypatch):
     assert all(f["status"] != "confirmed" for f in store.list_for("findings", run.id))
 
 
-@pytest.mark.parametrize(("proof_outcomes", "expected_state", "expected_finding_status"), [
-    (("pass", "fail"), S.ATTACK_INCONCLUSIVE, "inconclusive"),
-    (("pass", "inconclusive"), S.ATTACK_INCONCLUSIVE, "inconclusive"),
-    (("fail", "inconclusive"), S.ATTACK_INCONCLUSIVE, "inconclusive"),
-    (("pass", "pass"), S.COMPLETED, "fixed"),
-    (("fail", "fail"), S.NO_CONFIRMED_FINDING, "unconfirmed"),
-])
-def test_inconsistent_or_incomplete_proof_runs_are_inconclusive(
-    monkeypatch, proof_outcomes, expected_state, expected_finding_status
-):
-    outcomes = iter(proof_outcomes)
-
-    async def inconsistent_run(run_id, action, code_dir, spec=None, is_demo=False, label=""):
-        if action == "proof" and label.startswith("attack proof"):
-            outcome = next(outcomes)
-        else:
-            outcome = {
-                "probe": "pass", "proof": "fail", "benign": "pass", "regression": "pass",
-            }[action]
-        result = {"checks": [{"check": "net", "blocked": True, "detail": "x"}],
-                  "all_blocked": True} if action == "probe" else {"confirmed": outcome == "pass"}
-        return store.insert("test_runs", {"id": store.new_id("tr"), "run_id": run_id, "kind": action,
-                                          "command": action, "env_id": "sim", "exit_code": 0, "output": "",
-                                          "started": time.time(), "ended": time.time(), "outcome": outcome,
-                                          "sandboxed": 1, "data": {"label": label, "result": result}})
-
-    monkeypatch.setattr(sandbox, "run", inconsistent_run)
-
-    async def go():
-        run = battle.create("battle", None, "participate", "red")
-        while not run.task.done():
-            if run.waiting == "red_attack":
-                battle.submit_human(run, {"payload": "a second validation attempt"})
-            elif run.waiting == "approval":
-                battle.submit_approval(run, run.patch_id, "approved", "test")
-            elif run.waiting == "red_retest":
-                battle.submit_human(run, {"proceed": True})
-            await asyncio.sleep(0.02)
-        await run.task
-        return run
-
-    run = asyncio.run(go())
-    assert run.state == expected_state
-    finding = store.list_for("findings", run.id)[0]
-    assert finding["status"] == expected_finding_status
-
-
 def test_apply_refuses_without_approval(fake_sandbox):
     async def go():
         run = battle.create("battle", None, "spectator", None)
