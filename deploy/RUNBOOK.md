@@ -71,6 +71,11 @@ setup.sh installs Docker, gVisor (`runsc`, skip with `GVISOR=0`), builds the san
 `sandbox/`, installs the systemd service as the `vulnigo` user, Caddy (HTTPS when `DOMAIN` is set)
 and the firewall. It is safe to re-run after a `git pull`.
 
+The systemd unit restricts host filesystem writes to the app data directory and enables
+additional kernel, control-group, home-directory, and setuid/setgid protections. The service
+user remains in the `docker` group so it can start containers; that group is root-equivalent
+on the host, so the service account must still be treated as privileged.
+
 `/health` reports whether the sandbox image is present and the enforced policy. If `sandbox` is
 `false`, every test is reported **inconclusive**, never passed.
 

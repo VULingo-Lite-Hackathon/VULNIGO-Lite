@@ -157,6 +157,8 @@ uvicorn vulnigo.main:app --reload         # http://localhost:8000
 Open the command centre, choose **Prepared demo repo**, and pick a mode. `GET /health` reports whether the
 sandbox and Vultr inference are available. Without Docker, every test is reported as **inconclusive** (never
 confirmed). Without an inference key, agents run a labelled deterministic fallback.
+If multiple proof attempts disagree, or any required proof attempt cannot complete, the finding is reported
+as **inconclusive** rather than confirmed from only the successful attempt.
 
 ```sh
 pytest tests -q                           # intake, state machine, scanner/patch, full battles (simulated sandbox)

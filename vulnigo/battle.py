@@ -291,7 +291,15 @@ async def _battle(run: Run) -> None:
         _emit_test(run, "human", human_proof)
 
     outcomes = [proof["outcome"]] + ([human_proof["outcome"]] if human_proof else [])
-    status = "confirmed" if "pass" in outcomes else ("unconfirmed" if "fail" in outcomes else "inconclusive")
+    usable_outcomes = {outcome for outcome in outcomes if outcome in {"pass", "fail"}}
+    if not all(outcome in {"pass", "fail"} for outcome in outcomes) or len(usable_outcomes) > 1:
+        status = "inconclusive"
+    elif "pass" in usable_outcomes:
+        status = "confirmed"
+    elif "fail" in usable_outcomes:
+        status = "unconfirmed"
+    else:
+        status = "inconclusive"
     evidence_test = next((t for t in (proof, human_proof) if t and t["outcome"] == "pass"), proof)
     fid = store.new_id("fd")
     store.insert("findings", {"id": fid, "run_id": run.id, "category": cand["category"], "file": cand["file"],
