@@ -107,3 +107,35 @@ def test_red_participant_picks_traversal_and_blue_fixes_it(fake_sandbox):  # noq
     assert f["category"] == "path-traversal" and f["function"] == "read_upload" and f["status"] == "fixed"
     assert "read_upload" in f["hypothesis"] and "file_size" not in f["hypothesis"]
     assert "os.path.basename(filename)" in store.list_for("patches", run.id)[0]["diff"]
+
+
+# ---- issue #7: the fix must load, not just parse
+def _fix_for(tmp_path, src):
+    (tmp_path / "m.py").write_text(src, encoding="utf-8")
+    finding = _pt(tmp_path)[0]
+    return patcher.deterministic_fix(str(tmp_path), finding)
+
+
+def test_fix_puts_import_os_after_future_imports(tmp_path):
+    src = ('"""Doc."""\nfrom __future__ import annotations\n\nBASE = "/srv/uploads"\n\n\n'
+           "def read_name(name):\n    return open(os.path.join(BASE, name)).read()\n")
+    fix = _fix_for(tmp_path, src)
+    assert fix is not None
+    compile(fix["new_text"], "m.py", "exec")
+    lines = fix["new_text"].splitlines()
+    assert lines.index("import os") > lines.index("from __future__ import annotations")
+
+
+def test_fix_treats_import_os_path_as_importing_os(tmp_path):
+    src = ("from __future__ import annotations\nimport os.path\n\nBASE = '/srv/uploads'\n\n\n"
+           "def read_name(name):\n    return open(os.path.join(BASE, name)).read()\n")
+    fix = _fix_for(tmp_path, src)
+    assert fix is not None
+    compile(fix["new_text"], "m.py", "exec")
+    assert "import os\n" not in fix["new_text"]
+
+
+def test_validate_rejects_a_misplaced_future_import():
+    import pytest
+    with pytest.raises(patcher.PatchError):
+        patcher.validate("x = 1\n", "import os\nfrom __future__ import annotations\nx = 1\n", "path-traversal")
