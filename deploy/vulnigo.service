@@ -12,7 +12,12 @@ ExecStart=/opt/vulnigo/.venv/bin/uvicorn vulnigo.main:app --host 127.0.0.1 --por
 Restart=on-failure
 NoNewPrivileges=true
 PrivateTmp=true
-ProtectSystem=full
+ProtectSystem=strict
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+ReadWritePaths=/opt/vulnigo/data
 
 [Install]
 WantedBy=multi-user.target
