@@ -10,6 +10,7 @@ action by name; they can never supply a shell command.
 import asyncio
 import json
 import os
+import re
 import shutil
 import sys
 import tempfile
@@ -159,11 +160,61 @@ async def _exec(argv: list[str], env: dict | None, cwd: str | None, timeout: int
     return proc.returncode, out.decode(errors="replace"), False, False
 
 
+_TOKEN = re.compile(r"[A-Za-z0-9]{1,64}")
+_SPEC_KEYS = {"file", "function", "param", "params", "category", "token", "custom_payload", "mode"}
+
+
+def _ident(x) -> bool:
+    # str.isidentifier, not a regex: the scanner takes names from ast, which allows unicode, and `$` would let "f\n" through.
+    return isinstance(x, str) and x.isidentifier()
+
+
+def _validate_spec(spec, code_dir) -> None:
+    """Reject any proof/benign spec the scanner could not have produced. Raises ValueError; nothing has run yet."""
+    if not isinstance(spec, dict):
+        raise ValueError("spec must be an object")
+    extra = set(spec) - _SPEC_KEYS
+    if extra:
+        raise ValueError(f"unknown spec keys: {sorted(extra)}")
+    f = spec.get("file")
+    if (not isinstance(f, str) or not f.endswith(".py") or ".." in f.split("/") or f.startswith("/")
+            or "\\" in f or ":" in f):
+        raise ValueError("spec.file must be a relative .py path inside the repository")
+    # proof.py imports file[:-3] with "/" turned into "."; a dotted stem or a stdlib-named first segment would
+    # load some other module (stdlib wins), so a proof on it would say nothing about the repo file checked here.
+    if "." in f[:-3] or f.split("/")[0].removesuffix(".py") in sys.stdlib_module_names:
+        raise ValueError("spec.file would be imported as a different module than the repository file")
+    root = Path(code_dir).resolve()
+    target = (root / f).resolve()
+    if not target.is_relative_to(root) or not target.is_file():
+        raise ValueError("spec.file is not a regular file inside the repository")
+    fn = spec.get("function")
+    if not _ident(fn) or (fn.startswith("__") and fn.endswith("__")):
+        raise ValueError("spec.function must be an identifier and not a dunder name")
+    param, params = spec.get("param"), spec.get("params")
+    if not _ident(param):
+        raise ValueError("spec.param must be an identifier")
+    # param may be keyword-only, which the scanner leaves out of params, so it is not required to be in params.
+    if not isinstance(params, list) or not all(_ident(x) for x in params):
+        raise ValueError("spec.params must be a list of identifiers")
+    if spec.get("category", "command-injection") not in ("command-injection", "path-traversal"):
+        raise ValueError("spec.category is not a known category")
+    if "token" in spec and not (isinstance(spec["token"], str) and _TOKEN.fullmatch(spec["token"])):
+        raise ValueError("spec.token must be 1-64 alphanumerics")
+    cp = spec.get("custom_payload")
+    if "custom_payload" in spec and (not isinstance(cp, str) or len(cp) > 300):
+        raise ValueError("spec.custom_payload must be a string of at most 300 characters")
+    if spec.get("mode") not in (None, "benign", "attack"):
+        raise ValueError("spec.mode must be benign or attack")
+
+
 async def run(run_id: str, action: str, code_dir: str, spec: dict | None = None,
               is_demo: bool = False, label: str = "") -> dict:
     """Run one allowlisted action and record it as a test_run row. Returns that row."""
     if action not in ACTIONS:
         raise ValueError(f"action {action!r} is not allowlisted")
+    if action in ("proof", "benign"):
+        _validate_spec(spec, code_dir)
     spec = spec or {}
     argv = ACTIONS[action](spec)
     env_id = "sbx_" + uuid.uuid4().hex[:8]
