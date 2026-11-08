@@ -8,6 +8,7 @@ Only allowlisted actions exist (probe / proof / benign / regression). Agents can
 action by name; they can never supply a shell command.
 """
 import asyncio
+import datetime
 import json
 import os
 import re
@@ -16,6 +17,7 @@ import sys
 import tempfile
 import time
 import uuid
+import weakref
 from pathlib import Path
 
 from . import config, store
@@ -25,6 +27,12 @@ _docker_ok: bool | None = None
 MAX_OUTPUT_BYTES = 64 * 1024  # per run; more than any real test report needs
 CAP_NOTICE = "\n[output cut at 64 KB]"
 KILL_TIMEOUT_S = 20  # how long `docker kill` may take before the backend stops waiting for it
+MAX_CONTAINERS = int(os.getenv("SANDBOX_MAX_CONTAINERS", "4"))  # sandbox containers alive at once per event loop (the backend runs one)
+_SBX_NAME = re.compile(r"sbx_[0-9a-f]{8}")
+STALE_MARGIN_S = 30  # a container older than SANDBOX_TIMEOUT + this cannot belong to a live run
+_swept = False
+_sweeping: asyncio.Future | None = None
+_slots: "weakref.WeakKeyDictionary" = weakref.WeakKeyDictionary()  # event loop -> Semaphore (one loop each)
 
 
 async def docker_available() -> bool:
@@ -43,6 +51,17 @@ async def docker_available() -> bool:
     return _docker_ok
 
 
+GVISOR_MIN_PIDS = 256  # gVisor counts its own host threads (~2.5 per process); below this a modest test crashes the sandbox
+
+
+def pids_limit() -> str:
+    """The --pids-limit to enforce. Under gVisor (runsc) the cgroup limit also counts the sentry's host threads, and
+    crossing it kills the whole sandbox silently, so the limit is raised to a floor that still bounds a fork bomb."""
+    if config.SANDBOX_RUNTIME == "runsc":
+        return str(max(int(config.SANDBOX_PIDS), GVISOR_MIN_PIDS))
+    return str(config.SANDBOX_PIDS)
+
+
 def describe_policy() -> dict:
     return {
         "network": "none",
@@ -54,7 +73,7 @@ def describe_policy() -> dict:
         "stop_signal": "SIGKILL",
         "memory": config.SANDBOX_MEMORY,
         "cpus": config.SANDBOX_CPUS,
-        "pids": config.SANDBOX_PIDS,
+        "pids": pids_limit(),
         "timeout_s": config.SANDBOX_TIMEOUT,
         "capabilities": "all dropped, no-new-privileges",
         "runtime": config.SANDBOX_RUNTIME or "runc",
@@ -78,7 +97,7 @@ def _docker_cmd(name: str, code_dir: str, argv: list[str]) -> list[str]:
            "--tmpfs", "/tmp:rw,noexec,nosuid,size=32m,mode=1777",
            "--memory", config.SANDBOX_MEMORY, "--memory-swap", config.SANDBOX_MEMORY,
            "--cpus", config.SANDBOX_CPUS,
-           "--pids-limit", config.SANDBOX_PIDS,
+           "--pids-limit", pids_limit(),
            "--ulimit", "nofile=256:256",
            "--stop-signal", "SIGKILL",
            "--cap-drop", "ALL",
@@ -114,6 +133,70 @@ async def _drain(stream, limit: int) -> tuple[bytes, bool]:
     return bytes(buf), False
 
 
+async def _docker(*args: str, timeout: float = KILL_TIMEOUT_S) -> tuple[int | None, str]:
+    """Run a docker CLI command. Returns (exit code, stdout); (None, "") if it did not answer in time or failed to start."""
+    try:
+        p = await asyncio.create_subprocess_exec("docker", *args, stdout=asyncio.subprocess.PIPE,
+                                                 stderr=asyncio.subprocess.DEVNULL)
+    except OSError:
+        return None, ""
+    try:
+        out, _ = await asyncio.wait_for(p.communicate(), timeout)
+    except asyncio.TimeoutError:
+        p.kill()
+        await p.wait()
+        return None, ""
+    return p.returncode, out.decode(errors="replace")
+
+
+async def sweep_leftovers() -> int:
+    """Remove sandbox containers a crashed or restarted backend left behind. Returns how many were removed.
+
+    Only containers older than any live run can be (SANDBOX_TIMEOUT plus a margin) are removed, so a second
+    backend or a test run sharing this Docker daemon keeps its running containers.
+    """
+    rc, out = await _docker("ps", "-a", "--filter", "name=sbx_", "--format", "{{.Names}}")
+    if rc != 0:
+        return 0
+    names = [n for n in out.split() if _SBX_NAME.fullmatch(n)]
+    if not names:
+        return 0
+    _, info = await _docker("inspect", "--format", "{{.Name}} {{.Created}}", *names)
+    now = datetime.datetime.now(datetime.timezone.utc)
+    removed = 0
+    for line in info.splitlines():
+        try:
+            name, created = line.split()
+            born = datetime.datetime.strptime(created[:19], "%Y-%m-%dT%H:%M:%S").replace(tzinfo=datetime.timezone.utc)
+        except ValueError:
+            continue
+        name = name.lstrip("/")
+        if name in names and (now - born).total_seconds() > config.SANDBOX_TIMEOUT + STALE_MARGIN_S:
+            await _docker("rm", "-f", name)
+            removed += 1
+    return removed
+
+
+async def _safe_sweep() -> int:
+    try:
+        return await sweep_leftovers()
+    except Exception:  # a broken sweep must never stop the sandbox from running tests
+        return 0
+
+
+async def _sweep_once() -> None:
+    """Sweep once per process. Every first-wave run waits for the same task, so the sweep never meets our own
+    containers, and shield() keeps one cancelled run from cancelling the sweep for the runs after it."""
+    global _swept, _sweeping
+    if _swept:
+        return
+    loop = asyncio.get_running_loop()
+    if _sweeping is None or _sweeping.get_loop() is not loop or (_sweeping.done() and _sweeping.cancelled()):
+        _sweeping = asyncio.ensure_future(_safe_sweep())  # a task left by a finished loop is dead weight
+    await asyncio.shield(_sweeping)
+    _swept = True
+
+
 async def _kill(proc, kill_name: str | None) -> None:
     # The docker client goes first. After a cut nobody reads its output, and the daemon can block writing to it;
     # a `docker kill` sent while that client is alive waits behind the block (seen with a flooding test on Docker Desktop).
@@ -123,13 +206,9 @@ async def _kill(proc, kill_name: str | None) -> None:
         pass
     await proc.wait()
     if kill_name:
-        k = await asyncio.create_subprocess_exec("docker", "kill", kill_name,
-                                                 stdout=asyncio.subprocess.DEVNULL,
-                                                 stderr=asyncio.subprocess.DEVNULL)
-        try:
-            await asyncio.wait_for(k.wait(), KILL_TIMEOUT_S)
-        except asyncio.TimeoutError:
-            k.kill()
+        rc, _ = await _docker("kill", kill_name)
+        if rc != 0:  # no answer or no such container: force-remove so nothing keeps running after the test
+            await _docker("rm", "-f", kill_name)
 
 
 async def _exec(argv: list[str], env: dict | None, cwd: str | None, timeout: int,
@@ -154,6 +233,9 @@ async def _exec(argv: list[str], env: dict | None, cwd: str | None, timeout: int
     except asyncio.TimeoutError:
         await _kill(proc, kill_name)
         return None, f"timed out after {timeout}s (killed)", True, False
+    except asyncio.CancelledError:  # a battle abort or shutdown must not leave the container running
+        await asyncio.shield(_kill(proc, kill_name))
+        raise
     if cut:
         await _kill(proc, kill_name)
         return None, out.decode(errors="replace") + CAP_NOTICE, False, True
@@ -208,6 +290,13 @@ def _validate_spec(spec, code_dir) -> None:
         raise ValueError("spec.mode must be benign or attack")
 
 
+def _slot() -> asyncio.Semaphore:
+    loop = asyncio.get_running_loop()
+    if loop not in _slots:
+        _slots[loop] = asyncio.Semaphore(MAX_CONTAINERS)
+    return _slots[loop]
+
+
 async def run(run_id: str, action: str, code_dir: str, spec: dict | None = None,
               is_demo: bool = False, label: str = "") -> dict:
     """Run one allowlisted action and record it as a test_run row. Returns that row."""
@@ -221,8 +310,10 @@ async def run(run_id: str, action: str, code_dir: str, spec: dict | None = None,
     started = time.time()
     sandboxed = await docker_available()
     if sandboxed:
+        await _sweep_once()
         cmd = _docker_cmd(env_id, code_dir, argv)
-        code, out, timed_out, truncated = await _exec(cmd, None, None, config.SANDBOX_TIMEOUT + 10, env_id)
+        async with _slot():
+            code, out, timed_out, truncated = await _exec(cmd, None, None, config.SANDBOX_TIMEOUT + 10, env_id)
         shown = " ".join(argv[:3]) + (" <spec>" if len(argv) > 3 and action != "regression" else " " + " ".join(argv[3:]))
     elif is_demo and config.ALLOW_UNSANDBOXED_DEMO:
         # Dev-only path for the bundled demo repo on a machine without Docker. Clearly labelled.

@@ -26,13 +26,16 @@ FAIL=0
 RC=0
 OUT=""
 
-# Tighter caps than production so the whole run finishes in seconds. The limits the
+# Same limits as the backend (tests/test_containment_flags.py fails if they drift). The limits the
 # backend actually enforces are printed by: sudo vulnigo-sandbox --print-config
-BASE=(--rm --network none --read-only --memory 256m --memory-swap 256m --cpus 1
-      --pids-limit 128 --ulimit nofile=256:256
+BASE=(--rm --network none --read-only --memory 256m --memory-swap 256m --cpus 0.5
+      --pids-limit 64 --ulimit nofile=256:256
       --cap-drop ALL --security-opt no-new-privileges:true --stop-signal SIGKILL
-      --user 65534:65534 --tmpfs /tmp:rw,noexec,nosuid,size=32m
+      --user 65534:65534 --tmpfs /tmp:rw,noexec,nosuid,size=32m,mode=1777
       --volume "${PROBES}:/probe:ro" --label vulnigo.job=containment --workdir /tmp)
+# Optional gVisor, as deploy/setup.sh runs it in production:  SANDBOX_RUNTIME=runsc bash sandbox/containment.sh
+# gVisor counts its own host threads against the pids cgroup, so it needs the higher floor the backend uses.
+if [[ "${SANDBOX_RUNTIME:-}" == "runsc" ]]; then BASE+=(--runtime runsc --pids-limit 256); fi
 
 banner() { printf '\n=== %s\n' "$1" | tee -a "${LOG}"; }
 note()   { printf '    %s\n' "$1" | tee -a "${LOG}"; }
@@ -84,10 +87,14 @@ else
   breach "no evidence of the cap acting (exit ${RC})"
 fi
 
-banner "3. fork bomb  ->  pids-limit 128 must refuse new processes"
-attempt 3 docker run "${BASE[@]}" --entrypoint /usr/local/bin/guard.sh "${IMAGE}" 60 /probe/fork_bomb.py 500
+banner "3. fork bomb  ->  pids-limit 64 must refuse new processes"
+FORK_PROBE=fork_bomb.py
+[[ "${SANDBOX_RUNTIME:-}" == "runsc" ]] && FORK_PROBE=fork_bomb_live.py  # gVisor ignores exited children: use live ones
+attempt 3 docker run "${BASE[@]}" --entrypoint /usr/local/bin/guard.sh "${IMAGE}" 60 "/probe/${FORK_PROBE}" 500
 if [[ ${RC} -eq 0 ]] && assert_has 'blocked with EAGAIN'; then
   held "process table capped; further forks returned EAGAIN"
+elif [[ "${SANDBOX_RUNTIME:-}" == "runsc" && ${RC} -ne 0 ]] && ! assert_has 'did not hold'; then
+  held "gVisor ended the sandbox when the process limit was crossed (contained, exit ${RC})"
 else
   breach "exit ${RC}: $(printf '%s' "${OUT}" | tail -1)"
 fi

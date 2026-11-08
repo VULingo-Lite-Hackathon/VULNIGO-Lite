@@ -178,8 +178,33 @@ def test_prepare_watches_the_clone_with_config_limits(monkeypatch):
     monkeypatch.setattr(intake, "_run_watched", fake_run_watched)
     with pytest.raises(IntakeError, match="Clone failed"):
         asyncio.run(intake.prepare("limits_wiring", "https://github.com/octocat/Hello-World"))
+    # While cloning, .git (the compressed pack) sits next to the checkout, so the watchdog sees up to ~1.7x the final
+    # size (measured: flask 1.5x, requests 1.7x, numpy 1.3x). It gets 2x; the real limit is checked after .git is removed.
     assert calls == [(config.WORK_DIR / "limits_wiring" / "source",
-                      config.MAX_REPO_MB * 1024 * 1024, config.CLONE_TIMEOUT)]
+                      2 * config.MAX_REPO_MB * 1024 * 1024, config.CLONE_TIMEOUT)]
+
+
+def test_a_clone_whose_git_dir_pushes_it_past_the_limit_is_not_rejected_if_the_checkout_fits(monkeypatch):
+    mb = 1024 * 1024
+    monkeypatch.setattr(config, "MAX_REPO_MB", 4)
+
+    async def fake_run_watched(argv, watch_dir, max_bytes, timeout, env):
+        (watch_dir / ".git").mkdir(parents=True)
+        (watch_dir / ".git" / "pack").write_bytes(b"x" * 2 * mb)  # compressed history
+        (watch_dir / "code.bin").write_bytes(b"x" * 3 * mb)       # checkout: 3 MB final, 5 MB watched
+        assert _watched_fits(watch_dir, max_bytes)
+
+    def _watched_fits(d, limit):
+        return intake._watched_size(d) <= limit
+
+    async def fake_git(*args, cwd=None, timeout=30):
+        return 0, "0123456789abcdef\n"
+
+    monkeypatch.setattr(intake, "_run_watched", fake_run_watched)
+    monkeypatch.setattr(intake, "_git", fake_git)
+    info = asyncio.run(intake.prepare("limits_git_dir", "https://github.com/octocat/Hello-World"))
+    assert info["commit_hash"] == "0123456789abcdef"
+    intake.cleanup("limits_git_dir")
 
 
 def test_prepare_removes_the_clone_when_the_post_clone_size_check_fails(monkeypatch):
@@ -196,3 +221,40 @@ def test_prepare_removes_the_clone_when_the_post_clone_size_check_fails(monkeypa
     with pytest.raises(IntakeError, match="larger than"):
         asyncio.run(intake.prepare("limits_post", "https://github.com/octocat/Hello-World"))
     assert not (config.WORK_DIR / "limits_post" / "source").exists()
+
+
+def test_a_checkout_over_the_limit_is_still_rejected_after_git_is_removed(monkeypatch):
+    mb = 1024 * 1024
+    monkeypatch.setattr(config, "MAX_REPO_MB", 4)
+
+    async def fake_run_watched(argv, watch_dir, max_bytes, timeout, env):
+        (watch_dir / ".git").mkdir(parents=True)
+        (watch_dir / ".git" / "pack").write_bytes(b"x" * 2 * mb)
+        (watch_dir / "code.bin").write_bytes(b"x" * 5 * mb)  # 5 MB checkout, 7 MB watched: under 2x8, over 4
+
+    async def fake_git(*args, cwd=None, timeout=30):
+        return 0, "0123456789abcdef\n"
+
+    monkeypatch.setattr(intake, "_run_watched", fake_run_watched)
+    monkeypatch.setattr(intake, "_git", fake_git)
+    with pytest.raises(IntakeError, match="larger than 4 MB"):
+        asyncio.run(intake.prepare("limits_over", "https://github.com/octocat/Hello-World"))
+    assert not (config.WORK_DIR / "limits_over" / "source").exists()
+
+
+def test_the_watchdog_abort_names_the_configured_limit_not_the_doubled_one(monkeypatch):
+    monkeypatch.setattr(config, "MAX_REPO_MB", 50)
+
+    async def fake_run_watched(argv, watch_dir, max_bytes, timeout, env):
+        raise intake.RepoTooLarge("watchdog")
+
+    monkeypatch.setattr(intake, "_run_watched", fake_run_watched)
+    with pytest.raises(IntakeError) as exc:
+        asyncio.run(intake.prepare("limits_msg", "https://github.com/octocat/Hello-World"))
+    assert "larger than 50 MB" in str(exc.value) and "100" not in str(exc.value)
+
+
+def test_watchdog_size_abort_is_a_repo_too_large_error(tmp_path):
+    watch = tmp_path / "snap"
+    with pytest.raises(intake.RepoTooLarge):
+        _run([sys.executable, "-c", FLOOD, str(watch)], watch, 128 * 1024, 30)
