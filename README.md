@@ -26,8 +26,8 @@ back to the evidence behind it.
 | --- | --- | --- |
 | Repo intake + URL validation | ✅ Done | Only `https://github.com/<owner>/<repo>` is accepted. Clone runs with hooks, submodules, symlinks and non-https protocols disabled. Commit hash is recorded. |
 | Battle state machine | ✅ Done | Every transition from the blueprint (plus `MANAGER_ANALYSING`) is enforced in code. Illegal jumps such as `DEFENDING → PATCHING` raise errors. |
-| Docker sandbox runner | ✅ Code done · ✅ run on a Vultr VM 2026-11-08 (Ubuntu 24.04, kernel 6.8.0-149, Docker CE 29.9.3, runc 1.5.2, gVisor runsc 20261102.0: sandbox tests pass under both runc and gVisor; local suite 218 passed) | `--network none`, nobody user, read-only root fs and code mount, caps dropped, CPU/mem/PID/time limits, optional gVisor (`runsc`). |
-| Containment probe ("containment moment") | ✅ Code done · ✅ `sandbox/containment.sh` on the Vultr VM 2026-11-08 under runc and under gVisor: 9 held, 0 breaches each | Before any repo code runs, the probe tries network, DNS, writing to the source, writing to `/etc`, the Docker socket, reading env secrets and root access. The UI shows each attempt as blocked or allowed. `sandbox/containment.sh` additionally fires a fork bomb, memory bomb, `rm -rf /`, egress/metadata and infinite-loop attack at the image and records HELD/BREACH. |
+| Docker sandbox runner | ✅ Code done · ⏳ not yet run on Vultr | `--network none`, nobody user, read-only root fs and code mount, caps dropped, CPU/mem/PID/time limits, optional gVisor (`runsc`). |
+| Containment probe ("containment moment") | ✅ Code done · ⏳ verify on VM | Before any repo code runs, the probe tries network, DNS, writing to the source, writing to `/etc`, the Docker socket, reading env secrets and root access. The UI shows each attempt as blocked or allowed. `sandbox/containment.sh` additionally fires a fork bomb, memory bomb, `rm -rf /`, egress/metadata and infinite-loop attack at the image and records HELD/BREACH. |
 | Security engine (Python: CWE-78 + CWE-22) | ✅ Done | AST taint scanners for command injection and path traversal; bounded proof harness (CWE-78: random token written to `/tmp`; CWE-22: planted token file read back via `../`); benign-input check; project pytest as regression. |
 | Demo target repo (`demo_repo/`, FileDesk) | ✅ Done | Two planted bugs in `filedesk/tools.py`: command injection in `file_size()` and path traversal in `read_upload()`, plus tests that must keep passing after the fix. |
 | Red / Blue / Manager / Backup agents | ✅ Done · ⏳ awaiting Vultr inference key | Use Vultr Serverless Inference (OpenAI-compatible). Without a key they run a deterministic fallback, labelled as such everywhere. |
@@ -36,7 +36,7 @@ back to the evidence behind it.
 | Repo Check mode | ✅ Done | Static and read-only: 14 rule families for malicious code and likely vulnerabilities. Everything is graded Potential. |
 | Pixel-art command centre | ✅ First version | Canvas rooms and agents, speech bubbles, live SSE feed, turn forms, diff approval, pointers, report modal. Needs a visual polish pass. |
 | Evidence store + report + scores | ✅ Done | SQLite. Every score line cites a test or patch id. |
-| Tests | ✅ 218 passing (Docker running) | `pytest tests` covers URL rejection and clone limits, the state machine, scanner/patch, the sandbox tool interface (spec validation), container cleanup and cap, and full battles. Tests marked `docker` run against the real sandbox image and skip without Docker. |
+| Tests | ✅ 56 passing | `pytest tests` covers URL rejection, the state machine, scanner/patch and full battles against a simulated sandbox. |
 | Vultr VM deployment | ⏳ Blocked | Waiting on the Vultr API key. `deploy/setup.sh` is ready. |
 | Demo video, slides, lablab submission | ⏳ To do | Needs a live public URL first. |
 
@@ -159,9 +159,7 @@ sandbox and Vultr inference are available. Without Docker, every test is reporte
 confirmed). Without an inference key, agents run a labelled deterministic fallback.
 
 ```sh
-pytest tests -q                           # everything; the real-Docker tests skip when Docker or the image is missing
-pytest tests -q -m docker                 # only the real-Docker tests: isolation, limits, whole battle (needs the image)
-docker build -t vulnigo-sandbox:latest sandbox   # build the sandbox image first
+pytest tests -q                           # intake, state machine, scanner/patch, full battles (simulated sandbox)
 ```
 
 ### Deploy to a Vultr VM
@@ -222,7 +220,7 @@ tests/                 test suite
 - **Evidence or it didn't happen.** Every reported finding, status and score traces to a recorded test result or a `file:line`.
 - **No silent changes.** Patch application never occurs without an approval record.
 - **Honest vocabulary.** `Confirmed` requires a bounded test that reproduced the stated behaviour. `Inconclusive` is never presented as a pass.
-- **Untrusted code runs only in a restricted container.** No repository code runs on the application host, in any mode. Docker lowers the risk; it is not an absolute guarantee, and its configuration and the host still matter (see below).
+- **Untrusted code stays contained.** No repository code runs on the application host, in any mode.
 - **No fabricated demos.** If a live model call fails, the run is a clearly labelled deterministic or pre-recorded result, stated as such.
 - **Cleanable by design.** Sandboxes, logs and evidence are torn down and archived after every battle and check.
 
@@ -232,9 +230,7 @@ tests/                 test suite
 - Repo Check reads public repositories statically and read-only; it parses repository code and does not execute it.
 - VULNIGO performs no scanning or exploitation of live public targets or servers.
 - Containers run non-root with restricted mounts, no host sockets, no secrets, outbound network disabled by default and strict resource limits.
-- The container limits are checked by tests (`tests/test_isolation_docker.py`, `sandbox/containment.sh`) on the machine they run on. They do not prove the host kernel or Docker daemon is free of escape bugs: keep the host patched, keep `VULNIGO_ALLOW_UNSANDBOXED_DEMO` unset on shared machines, and treat the VM as the outer boundary. Raw kernel-facing sockets (`AF_ALG`, `AF_VSOCK`, `AF_PACKET`, `AF_KEY`) are blocked in the container and a test pins that; `AF_UNIX`, `AF_INET` and `AF_NETLINK` stay available to repository code, so kernel bugs reachable through them are closed only by patching the host kernel. Run untrusted repositories on the patched Linux VM; a developer machine with Docker Desktop on WSL2 needs the current Docker Desktop and WSL releases first.
-- Repository URLs are validated to reject local-file, private-network and unintended schemes. Clones are capped at `MAX_REPO_MB` (50) and `CLONE_TIMEOUT` (60 s); a failed or oversized clone is deleted and the battle ends `FAILED`.
-- Sandbox requests are an allowlist (`probe`, `proof`, `benign`, `regression`). A proof spec is validated before any container starts. Under gVisor the process limit is raised to at least 256, because gVisor counts its own host threads against it. At most `SANDBOX_MAX_CONTAINERS` (4) containers run at once, and a restarted backend removes leftover `sbx_` containers older than the test timeout.
+- Repository URLs are validated to reject local-file, private-network and unintended schemes.
 - Commands, approvals, patches, backup requests, pointer decisions and test outcomes are logged for audit.
 
 A successful test of one vulnerability does not certify a repository as secure, and neither does a clean Repo
