@@ -22,6 +22,10 @@ class IntakeError(Exception):
     pass
 
 
+class RepoTooLarge(IntakeError):
+    """The clone watchdog stopped a clone that grew past its byte limit."""
+
+
 def validate_github_url(raw: str) -> str:
     """Return a canonical https://github.com/owner/repo URL or raise IntakeError.
 
@@ -52,6 +56,12 @@ def validate_github_url(raw: str) -> str:
     if not (_SEG.match(owner) and _SEG.match(repo)) or owner.startswith(".") or repo in (".", ".."):
         raise IntakeError("Owner or repository name contains unsupported characters.")
     return f"https://github.com/{owner}/{repo}"
+
+
+# While cloning, .git (the compressed pack) sits next to the checkout, so the watchdog sees more than the final size
+# (measured: flask 1.5x, requests 1.7x, numpy 1.3x). It gets this multiple of MAX_REPO_MB; the real limit is checked
+# on the checkout alone once .git is removed.
+CLONE_WATCH_FACTOR = 2
 
 
 def _dir_size(p: Path) -> int:
@@ -105,8 +115,11 @@ def _rm(path: Path) -> None:
 
 
 def _git_env() -> dict:
-    return {"PATH": os.environ.get("PATH", ""), "GIT_TERMINAL_PROMPT": "0", "GIT_ASKPASS": "echo",
-            "GIT_CONFIG_NOSYSTEM": "1", "HOME": str(config.DATA_DIR)}
+    env = {"PATH": os.environ.get("PATH", ""), "GIT_TERMINAL_PROMPT": "0", "GIT_ASKPASS": "echo",
+           "GIT_CONFIG_NOSYSTEM": "1", "HOME": str(config.DATA_DIR)}
+    if "SYSTEMROOT" in os.environ:  # Windows git needs it to resolve DNS; nothing else from the host is passed
+        env["SYSTEMROOT"] = os.environ["SYSTEMROOT"]
+    return env
 
 
 async def _git(*args: str, cwd: Path | None = None, timeout: int = 30) -> tuple[int, str]:
@@ -163,8 +176,8 @@ async def _run_watched(argv: list[str], watch_dir: Path, max_bytes: int, timeout
                 break
             # Walking the tree blocks, so it runs in a thread instead of stalling the event loop.
             if await asyncio.to_thread(_watched_size, watch_dir) > max_bytes:
-                raise IntakeError(f"Repository is larger than {max_bytes // (1024 * 1024)} MB; "
-                                  "Lite only supports small repos.")
+                raise RepoTooLarge(f"Repository is larger than {max_bytes // (1024 * 1024)} MB; "
+                                   "Lite only supports small repos.")
             if loop.time() >= deadline:
                 raise IntakeError(f"git clone timed out after {timeout}s")
         out, _ = comm.result()
@@ -195,13 +208,16 @@ async def prepare(run_id: str, repo_url: str | None) -> dict:
         label = "Prepared demo repository (FileDesk)"
     else:
         canonical = validate_github_url(repo_url)
-        await _run_watched(
-            ["git", "-c", "protocol.allow=never", "-c", "protocol.https.allow=always",
-             "-c", "core.hooksPath=/dev/null", "-c", "core.symlinks=false",
-             "-c", "submodule.recurse=false", "-c", "http.followRedirects=false",
-             "clone", "--depth", "1", "--single-branch", "--no-recurse-submodules", "--no-tags",
-             canonical + ".git", str(src)],
-            src, config.MAX_REPO_MB * 1024 * 1024, config.CLONE_TIMEOUT, _git_env())
+        try:
+            await _run_watched(
+                ["git", "-c", "protocol.allow=never", "-c", "protocol.https.allow=always",
+                 "-c", "core.hooksPath=/dev/null", "-c", "core.symlinks=false",
+                 "-c", "submodule.recurse=false", "-c", "http.followRedirects=false",
+                 "clone", "--depth", "1", "--single-branch", "--no-recurse-submodules", "--no-tags",
+                 canonical + ".git", str(src)],
+                src, CLONE_WATCH_FACTOR * config.MAX_REPO_MB * 1024 * 1024, config.CLONE_TIMEOUT, _git_env())
+        except RepoTooLarge as e:  # the watchdog's limit is CLONE_WATCH_FACTOR x the real one: name the real one
+            raise IntakeError(f"Repository is larger than {config.MAX_REPO_MB} MB; Lite only supports small repos.") from e
         try:
             code, out = await _git("rev-parse", "HEAD", cwd=src)
             if code != 0:

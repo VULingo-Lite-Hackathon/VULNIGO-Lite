@@ -250,7 +250,7 @@ and deployment of approved patches to real environments.
 | Ishaan | Co-lead · agent orchestration |
 | Mariam | Co-lead · frontend and command centre |
 | Askeri | Backend and battle controller |
-| APN | Sandbox and repository intake |
+| [APN](https://github.com/GPA-N) | Sandbox and repository intake |
 | Ahmad | Security engine |
 | Sharjeel | Evidence, QA and reporting |
 
