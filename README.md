@@ -26,22 +26,19 @@ back to the evidence behind it.
 | --- | --- | --- |
 | Repo intake + URL validation | ✅ Done | Only `https://github.com/<owner>/<repo>` is accepted. Clone runs with hooks, submodules, symlinks and non-https protocols disabled. Commit hash is recorded. |
 | Battle state machine | ✅ Done | Every transition from the blueprint (plus `MANAGER_ANALYSING`) is enforced in code. Illegal jumps such as `DEFENDING → PATCHING` raise errors. |
-| Docker sandbox runner | ✅ Code done · ⏳ not yet run on Vultr | `--network none`, nobody user, read-only root fs and code mount, caps dropped, CPU/mem/PID/time limits, optional gVisor (`runsc`). |
-| Containment probe ("containment moment") | ✅ Code done · ⏳ verify on VM | Before any repo code runs, the probe tries network, DNS, writing to the source, writing to `/etc`, the Docker socket, reading env secrets and root access. The UI shows each attempt as blocked or allowed. `sandbox/containment.sh` additionally fires a fork bomb, memory bomb, `rm -rf /`, egress/metadata and infinite-loop attack at the image and records HELD/BREACH. |
+| Docker sandbox runner | ✅ Done · verified on a Vultr VM | `--network none`, nobody user, read-only root fs and code mount, caps dropped, CPU/mem/PID/time limits, optional gVisor (`runsc`). Verified on a Vultr VM under plain Docker and gVisor. |
+| Containment probe ("containment moment") | ✅ Done · verified on a Vultr VM | Before any repo code runs, the probe tries network, DNS, writing to the source, writing to `/etc`, the Docker socket, reading env secrets and root access. The UI shows each attempt as blocked or allowed. `sandbox/containment.sh` additionally fires a fork bomb, memory bomb, `rm -rf /`, egress/metadata and infinite-loop attack at the image and records HELD/BREACH. Run on a Vultr VM under plain Docker and gVisor: 9 held, 0 breach. |
 | Security engine (Python: CWE-78 + CWE-22) | ✅ Done | AST taint scanners for command injection and path traversal; bounded proof harness (CWE-78: random token written to `/tmp`; CWE-22: planted token file read back via `../`); benign-input check; project pytest as regression. |
 | Demo target repo (`demo_repo/`, FileDesk) | ✅ Done | Two planted bugs in `filedesk/tools.py`: command injection in `file_size()` and path traversal in `read_upload()`, plus tests that must keep passing after the fix. |
-| Red / Blue / Manager / Backup agents | ✅ Done · ⏳ awaiting Vultr inference key | Use Vultr Serverless Inference (OpenAI-compatible). Without a key they run a deterministic fallback, labelled as such everywhere. |
+| Red / Blue / Manager / Backup agents | ✅ Done | Use Vultr Serverless Inference (OpenAI-compatible). Without a key they run a deterministic fallback, labelled as such everywhere. |
 | Patch approval gate | ✅ Done | Approve, request changes (2 revisions max) or reject. `patcher.apply` refuses to run without an approval record. |
 | Retest + verdicts | ✅ Done | Fixed and retested / Unresolved / Inconclusive, decided only from test runs. |
 | Repo Check mode | ✅ Done | Static and read-only: 14 rule families for malicious code and likely vulnerabilities. Everything is graded Potential. |
-| Pixel-art command centre | ✅ First version | Canvas rooms and agents, speech bubbles, live SSE feed, turn forms, diff approval, pointers, report modal. Needs a visual polish pass. |
+| Pixel-art command centre | ✅ Done | Canvas rooms and agents, speech bubbles, live SSE feed, turn forms, diff approval, pointers, report modal. |
 | Evidence store + report + scores | ✅ Done | SQLite. Every score line cites a test or patch id. |
 | Tests | ✅ 56 passing | `pytest tests` covers URL rejection, the state machine, scanner/patch and full battles against a simulated sandbox. |
-| Vultr VM deployment | ⏳ Blocked | Waiting on the Vultr API key. `deploy/setup.sh` is ready. |
-| Demo video, slides, lablab submission | ⏳ To do | Needs a live public URL first. |
-
-**Next steps:** create the Vultr VM → run `deploy/setup.sh` → add the inference key → run real sandboxed battles
-end to end on the VM → UI polish → record the demo (including the containment moment) → submit.
+| Vultr VM deployment | ✅ Done | Deployed with `deploy/setup.sh`. |
+| Demo video, slides, lablab submission | ✅ Done | Demo video recorded with the containment moment; submitted on lablab.ai. |
 
 ## Built on Vultr
 
